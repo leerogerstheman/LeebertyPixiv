@@ -1835,6 +1835,19 @@ def app_url_to_original(url: str) -> str:
 # --------------------------------------------------------------------------------------
 
 
+def _split_tag(name: str) -> List[str]:
+    """拆开 pixiv 偶发的拼接标签（如 '初音ミク,' / '初音ミク, VOCALOID'）。
+
+    pixiv 的合法标签本身不含逗号/顿号，所以遇到这些分隔符就可以安全拆开；
+    拆完去掉空片段和首尾空白。返回拆分后的标签名列表。
+    """
+    name = str(name).strip()
+    if not name:
+        return []
+    parts = re.split(r"[,，、;；/]", name)
+    return [p.strip() for p in parts if p.strip()]
+
+
 def tags_from_detail(detail: Dict[str, Any], stopwords: Sequence[str], max_tags: int) -> List[Dict[str, str]]:
     """从作品详情里取出干净的标签列表（去掉 users入り 之类的噪声标签）。
 
@@ -1860,13 +1873,15 @@ def tags_from_detail(detail: Dict[str, Any], stopwords: Sequence[str], max_tags:
                 trans = str(tr.get("zh") or tr.get("zh_tw") or tr.get("en") or "").strip()
         else:
             name, trans = str(t).strip(), ""
-        if not name:
-            continue
-        if name.lower() in stop:
-            continue
-        if USERS_IRI_RE.match(name) or USERS_IRI_RE2.search(name):
-            continue
-        res.append({"name": name, "translation": trans})
+        # 拼接标签拆分（如 '初音ミク,' 拆成 '初音ミク'）
+        for name in _split_tag(name):
+            if not name:
+                continue
+            if name.lower() in stop:
+                continue
+            if USERS_IRI_RE.match(name) or USERS_IRI_RE2.search(name):
+                continue
+            res.append({"name": name, "translation": trans})
     seen = set()
     uniq: List[Dict[str, str]] = []
     for t in res:
@@ -5890,11 +5905,31 @@ def cmd_repair(args: argparse.Namespace, program_dir: Path) -> int:
     """按索引找出缺失的页并补齐（不依赖搜索结果，因此不会漏掉任何作品）。
 
     典型场景：早期用 --max-pages-per-work 只下了一页；或磁盘上文件被误删。
+    加 --clean-tags 可同时清洗 pixiv 偶发返回的拼接标签（如 '初音ミク,'）。
     """
     cfg, lib = prepare_cfg(args, program_dir)
     recs = lib.load_records()
     if not recs:
         out(f"图库为空（{lib.root}），无需修复。")
+        return 0
+
+    # ---- 清洗拼接标签（--clean-tags）----
+    if getattr(args, "clean_tags", False):
+        fixed = 0
+        for r in recs:
+            tags = r.get("tags") or []
+            cleaned = [x for t in tags for x in _split_tag(str(t))]
+            if cleaned != [str(t).strip() for t in tags]:
+                r["tags"] = cleaned
+                fixed += 1
+        if fixed:
+            # 写回前剔除合并进来的 d_tags，保持 records.jsonl 干净（原数据不含衍生标签）
+            for r in recs:
+                r.pop("d_tags", None)
+            lib.upsert_records(recs)
+            out(f"[修复] 清洗了 {fixed} 条记录的拼接标签（含逗号/顿号的标签已拆开）。")
+        else:
+            out("[修复] 没有发现拼接标签，无需清洗。")
         return 0
 
     by_work: Dict[str, Dict[str, Any]] = {}
@@ -7047,12 +7082,16 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
 
     srow3 = ttk.Frame(tab_lib, padding=(0, 0, 0, 4))
     srow3.pack(fill="x")
-    ttk.Label(srow3, text="原有TAG筛选（可多选；默认要求全部命中）：").pack(side="left")
+    ttk.Label(srow3, text="原有TAG筛选（可多选 Ctrl/Shift；默认要求全部命中）：").pack(side="left")
     tag_all_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(srow3, text="要求全部命中", variable=tag_all_var).pack(side="left", padx=(6, 0))
-    tag_filter_var = tk.StringVar()
     ttk.Label(srow3, text="　快速过滤标签：").pack(side="left")
-    ttk.Entry(srow3, textvariable=tag_filter_var, width=14).pack(side="left")
+    tag_filter_var = tk.StringVar()
+    # Combobox：输入时自动补全候选（如键入「原」→ 列出「原神」等已存在标签），
+    # 选择或回车后按该标签过滤左侧列表
+    tag_filter_cb = ttk.Combobox(srow3, textvariable=tag_filter_var, width=16)
+    tag_filter_cb.pack(side="left")
+    ttk.Label(srow3, text="（可输入过滤，或从候选里选）", foreground="#888").pack(side="left", padx=(6, 0))
 
     dtag_row = ttk.Frame(tab_lib, padding=(0, 0, 0, 4))
     dtag_row.pack(fill="x")
@@ -7061,6 +7100,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     ttk.Checkbutton(dtag_row, text="要求全部命中", variable=dtag_all_var).pack(side="left", padx=(6, 0))
     dtag_filter_var = tk.StringVar()
     ttk.Label(dtag_row, text="　快速过滤：").pack(side="left")
+    dtag_filter_cb = ttk.Combobox(dtag_row, textvariable=dtag_filter_var, width=16)
+    dtag_filter_cb.pack(side="left")
     ttk.Entry(dtag_row, textvariable=dtag_filter_var, width=14).pack(side="left")
     ttk.Button(dtag_row, text="编辑衍生标签…",
                command=lambda: edit_dtags_dialog()).pack(side="left", padx=(10, 0))
@@ -7408,8 +7449,63 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         ttk.Button(brow, text=txt, command=fn).pack(side="right", padx=2)
     for w in (qe,):
         w.bind("<Return>", run_search)
-    tag_filter_var.trace_add("write", lambda *_a: load_tags())
-    dtag_filter_var.trace_add("write", lambda *_a: load_dtag_list())
+    def _suggest_tags(prefix: str, hist: List[Tuple[str, int]]) -> List[str]:
+        """给输入框的自动补全候选：匹配前缀/包含的已存在标签，按出现次数排序。"""
+        p = prefix.strip().lower()
+        if not p:
+            return []
+        cands = [t for t, _n in hist if p in t.lower()]
+        cands.sort(key=lambda t: (-next((n for tt, n in hist if tt == t), 0), t))
+        return cands[:20]
+
+    def _on_tag_filter(*_a: Any) -> None:
+        # 输入框内容变化：过滤左侧列表 + 更新下拉候选
+        tag_filter_cb["values"] = _suggest_tags(tag_filter_var.get(),
+                                                tag_histogram(L["recs"]))
+        load_tags()
+
+    def _on_tag_filter_pick(_e: Any = None) -> None:
+        # 从下拉候选里选了一个：点选该标签到 tag_box 并检索
+        sel = tag_filter_cb.get().strip()
+        if not sel:
+            return
+        sel_name = sel.rsplit("　(", 1)[0]
+        found = -1
+        for i in range(tag_box.size()):
+            if tag_box.get(i).rsplit("　(", 1)[0] == sel_name:
+                found = i
+                break
+        if found >= 0:
+            tag_box.selection_clear(0, "end")
+            tag_box.selection_set(found)
+            tag_box.see(found)
+        run_search()
+
+    def _on_dtag_filter(*_a: Any) -> None:
+        dtag_filter_cb["values"] = _suggest_tags(dtag_filter_var.get(),
+                                                 dtag_histogram(L["recs"]))
+        load_dtag_list()
+
+    def _on_dtag_filter_pick(_e: Any = None) -> None:
+        sel = dtag_filter_cb.get().strip()
+        if not sel:
+            return
+        sel_name = sel.rsplit("　(", 1)[0]
+        for i in range(dtag_box.size()):
+            if dtag_box.get(i).rsplit("　(", 1)[0] == sel_name:
+                dtag_box.selection_clear(0, "end")
+                dtag_box.selection_set(i)
+                dtag_box.see(i)
+                break
+        run_search()
+
+    tag_filter_var.trace_add("write", _on_tag_filter)
+    dtag_filter_var.trace_add("write", _on_dtag_filter)
+    tag_filter_cb.bind("<<ComboboxSelected>>", _on_tag_filter_pick)
+    dtag_filter_cb.bind("<<ComboboxSelected>>", _on_dtag_filter_pick)
+    # 单击标签即检索（多选时每次释放也刷新）；双击保留
+    tag_box.bind("<ButtonRelease-1>", lambda _e: run_search())
+    dtag_box.bind("<ButtonRelease-1>", lambda _e: run_search())
     tag_box.bind("<Double-1>", run_search)
     dtag_box.bind("<Double-1>", run_search)
 
@@ -8428,6 +8524,8 @@ def build_parser(program_dir: Path) -> argparse.ArgumentParser:
     rp = sub.add_parser("repair", help="按索引补齐缺失的页/文件（不依赖搜索结果）", parents=[common])
     rp.add_argument("--dry-run", dest="dry_run", action="store_true", help="只列出缺什么，不下载")
     rp.add_argument("--limit", type=int, default=0, help="本次最多修复多少个作品（0=全部）")
+    rp.add_argument("--clean-tags", action="store_true",
+                    help="只清洗拼接标签（如 '初音ミク,' 拆成 '初音ミク'）后退出")
     st = sub.add_parser("selftest", help="自检：环境/配置/网络/凭据/索引（不下载图片）", parents=[common])
     st.add_argument("--offline", action="store_true", help="跳过网络测试，只做本地检查")
     r = sub.add_parser("reindex", help="重建 CSV/Markdown/SQLite 索引", parents=[common])
