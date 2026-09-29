@@ -1,8 +1,24 @@
 # pixiv 关键词爬虫（原图下载 + 可检索分类库）
 
+> ## 🧪 测试版（BETA）
+>
+> 当前版本为**测试版**：核心功能已可用，但仍在持续迭代中，**后续会有大量修改**。
+> 已知边界：pixiv 随时可能改接口（程序已做接口结构校验，改版时会明确报错）、
+> 界面文案可能调整、GitHub Release 可能追加新构建。
+> 建议：**定期 git pull 获取更新**；遇到问题请提 issue，最好附上日志与报错信息。
+
 **纯 Python 标准库实现，零第三方依赖、零 pip 安装**：
 输入关键词 → 抓取 pixiv 搜索结果 → 下载**原图** → 按标签/画师/关键词建立**硬链接分类**（不占额外空间）
 → 生成 CSV / Markdown / SQLite(FTS5) 索引 → 可命令行检索，也可用图形界面。
+
+**五种使用方式**（Windows 用户推荐 exe 或 gui.bat）：
+
+| 方式 | 适合谁 | 怎么用 |
+| --- | --- | --- |
+| 🖥 **图形界面 exe**（测试版发布形态） | 不想碰命令行的用户 | 下载 [GitHub Release](https://github.com/leerogerstheman/pixiv-crawler/releases) 里的 `PixivCrawler-windows.zip`，解压后双击 `PixivCrawler.exe` |
+| 🪟 ** gui.bat** | 已装 Python 的用户 | 双击 `gui.bat`（自动找 Python） |
+| 💻 命令行 | 喜欢命令行的用户 | 见下方命令 |
+| 🐍 源码运行 | 开发者 / 想改代码 | `python pixiv_crawler.py gui` |
 
 ```powershell
 python pixiv_crawler.py auth login                 # ① 登录 pixiv（见第二节）

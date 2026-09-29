@@ -36,3 +36,8 @@ desktop.ini
 _*_tmp.py
 _probe_*.py
 _test_*.py
+
+# ---- PyInstaller 构建产物（exe 发布走 GitHub Release 附件，不进仓库）----
+build/
+dist/
+*.spec

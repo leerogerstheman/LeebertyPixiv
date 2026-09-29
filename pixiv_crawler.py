@@ -62,8 +62,15 @@ def _load_sibling_module(filename: str, mod_name: str):
     """
     import importlib.util
 
-    path = Path(__file__).resolve().parent / filename
-    if not path.is_file():
+    # frozen（exe）时以 exe 所在目录为准；否则是脚本所在目录
+    base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+        else Path(__file__).resolve().parent
+    # PyInstaller onedir：辅助文件打包进 <exe 旁>/_internal；也在这里找
+    for cand in (base, base / "_internal"):
+        path = cand / filename
+        if path.is_file():
+            break
+    else:
         return None
     try:
         spec = importlib.util.spec_from_file_location(mod_name, path)
@@ -5224,10 +5231,13 @@ def cookie_from_browser(verbose: bool = False) -> Optional[str]:
     """
     import importlib.util
 
-    helper = Path(__file__).resolve().parent / "browser_cookie.py"
-    if not helper.is_file():
+    base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+        else Path(__file__).resolve().parent
+    helper = next((c / "browser_cookie.py" for c in (base, base / "_internal")
+                   if (c / "browser_cookie.py").is_file()), None)
+    if helper is None:
         if verbose:
-            out(f"  [i] 未找到 {helper.name}，跳过自动读取")
+            out("  [i] 未找到 browser_cookie.py（打包后可能缺失数据文件），跳过自动读取")
         return None
     try:
         spec = importlib.util.spec_from_file_location("pixiv_login_helper", helper)
@@ -6581,8 +6591,11 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         store = None
         try:
             import importlib.util as _ilu
-            _p = Path(__file__).resolve().parent / "artists.py"
-            if _p.is_file():
+            _base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+                else Path(__file__).resolve().parent
+            _p = next((c / "artists.py" for c in (_base, _base / "_internal")
+                       if (c / "artists.py").is_file()), None)
+            if _p is not None and _p.is_file():
                 _s = _ilu.spec_from_file_location("pixiv_artists2", _p)
                 _m = _ilu.module_from_spec(_s)
                 sys.modules["pixiv_artists2"] = _m
@@ -8535,7 +8548,13 @@ def build_parser(program_dir: Path) -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    program_dir = Path(__file__).resolve().parent
+    # 打包成 exe 时，__file__ 指向 PyInstaller 的 _internal 临时目录，
+    # 但 config.json / artists.py / ugoira.py / browser_cookie.py 与 exe 放同一目录。
+    # 因此：frozen 时一律把「exe 所在目录」当作程序目录。
+    if getattr(sys, "frozen", False):
+        program_dir = Path(sys.executable).resolve().parent
+    else:
+        program_dir = Path(__file__).resolve().parent
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser(program_dir)
     # 兼容 “python pixiv_crawler.py 初音ミク” 这种省略子命令的写法
