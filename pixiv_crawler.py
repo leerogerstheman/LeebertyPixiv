@@ -3183,6 +3183,12 @@ class CrawlSession:
         self.new_works: Set[str] = set()      # 本次实际下载成功的作品 ID（用于附自动衍生标签）
         self.dry_run: bool = False
         self.rec_lock = threading.Lock()
+        # ---- 可被 GUI 控制的停止/进度 ----
+        # stop_event：GUI「停止」按钮置位；各收集循环在安全点检查它，
+        # 一旦置位就优雅退出（已下载的图和索引都会保存，下次续跑）。
+        self.stop_event = threading.Event()
+        # progress_cb(dict)：GUI 通过它拿到当前进度（哪一步/完成了多少/总多少）。
+        self.progress_cb: Optional[Any] = None
         self.known: Dict[str, int] = {}
         self.tag_counts: Dict[str, int] = {}
         self.downloaded = 0
@@ -3215,6 +3221,20 @@ class CrawlSession:
             "skipped_artist": 0,
         }
         self.stopwords = [str(s) for s in (cfg.get("tag_stopwords") or [])]
+
+    # ---- 停止 / 进度（GUI 可控制）----
+
+    def should_stop(self) -> bool:
+        """在安全点检查：用户是否请求停止。"""
+        return self.stop_event.is_set()
+
+    def report(self, **kw: Any) -> None:
+        """上报进度。kw 如 dict(stage='artist', done=1, total=5, detail='らいおん 45/628')。"""
+        if self.progress_cb:
+            try:
+                self.progress_cb(kw)
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---- 单个作品 ----
 
@@ -3584,6 +3604,9 @@ class CrawlSession:
         if label:
             out(f"  · 组合：{label}")
         for page in range(max(1, start_page), max(1, pages) + 1):
+            if self.should_stop():
+                out(f"    [停止] 用户请求停止，{keyword}／{label or order} 翻到第 {page} 页截断")
+                break
             try:
                 items, extra = self.client.search_illusts(keyword, page, order=order,
                                                           mode=self.cfg.get("mode") or "all", s_mode=s_mode)
@@ -3681,8 +3704,12 @@ class CrawlSession:
             if not dry_run else 0
 
         for label, o, sm in combos:
+            if self.should_stop():
+                out("  [停止] 用户请求停止，跳过剩余搜索组合")
+                break
             key = SessionState.make_key(keyword, o, sm)
             run_keys.append(key)
+            self.report(stage="combo", done=len(run_keys), total=len(combos), detail=label or key)
             if self.state is not None and key in self.state.exhausted and not self.force:
                 out(f"  · 跳过已爬完的组合：{label or key}"
                     "（该组合上次已翻到接口尽头；要重爬请加 --force 或 --restart）")
@@ -3967,6 +3994,10 @@ class CrawlSession:
         pending: List[Dict[str, Any]] = []
         processed = 0
         for rank, wid in enumerate(targets, 1):
+            if self.should_stop():
+                out(f"  [停止] 用户请求停止，已保存 {processed}/{len(targets)} 个作品的处理进度")
+                break
+            self.report(stage="artist", done=rank, total=len(targets), detail=wid)
             brief: Dict[str, Any] = {"id": wid, "title": "", "pageCount": 1,
                                      "xRestrict": 0, "illustType": 0}
             try:
@@ -4035,6 +4066,10 @@ class CrawlSession:
         store = self.seg_state
 
         def walk(a: date, b: date, depth: int = 0) -> None:
+            if self.should_stop():
+                out("  [停止] 用户请求停止，全量分段截断（已完成的段已保存）")
+                store.save()
+                return
             scd, ecd = date_to_scd(a), date_to_scd(b)
             key = seg_key(keyword, scd, ecd, order, s_mode, mode)
             if store.is_done(key):
@@ -4187,7 +4222,11 @@ class CrawlSession:
         cap = max_works if max_works > 0 else int(self.cfg.get("max_works_per_run") or 0)
 
         for idx, aid in enumerate(artist_ids, 1):
+            if self.should_stop():
+                out("  [停止] 用户请求停止，跳过剩余画师")
+                break
             out(f"\n--- [{idx}/{len(artist_ids)}] 画师 {aid} ---")
+            self.report(stage="artist_scan", done=idx, total=len(artist_ids), detail=aid)
             ids, names = self.client.artist_work_ids(aid)
             if not ids:
                 out("  该画师没有公开作品，或接口返回为空（也可能是网络/权限问题）")
@@ -4226,6 +4265,10 @@ class CrawlSession:
             processed = 0
             skipped_before = self.skipped
             for rank, wid in enumerate(new_ids, 1):
+                if self.should_stop():
+                    out(f"  [停止] 用户请求停止，{display} 处理到 {processed}/{len(new_ids)}")
+                    break
+                self.report(stage="artist_dl", done=rank, total=len(new_ids), detail=wid)
                 brief: Dict[str, Any] = {"id": wid, "title": "", "pageCount": 1,
                                          "xRestrict": 0, "illustType": 0}
                 try:
@@ -4867,10 +4910,16 @@ def run_crawl(
     segmented: bool = False,
     seg_start: Any = None,
     seg_end: Any = None,
+    stop_event: Optional[Any] = None,
+    progress_cb: Optional[Any] = None,
     log=out,
 ) -> Dict[str, Any]:
     """爬取主流程（命令行与图形界面共用）。log 可换成 GUI 的日志函数。"""
     session = CrawlSession(cfg, lib, verbose=True)
+    if stop_event is not None:
+        session.stop_event = stop_event
+    if progress_cb is not None:
+        session.progress_cb = progress_cb
     session.force = force
     session.deep_all = deep_all
     session.dry_run = dry_run
@@ -5948,6 +5997,7 @@ def cmd_repair(args: argparse.Namespace, program_dir: Path) -> int:
 
 def run_follow_sync(cfg: Dict[str, Any], lib: Library, store, targets: Sequence[Any], *,
                     dry_run: bool = False, order: str = "date",
+                    stop_event: Optional[Any] = None, progress_cb: Optional[Any] = None,
                     log=out, started: float = 0.0) -> Dict[str, int]:
     """追更同步主流程（CLI 与图形界面共用）。
 
@@ -5955,6 +6005,10 @@ def run_follow_sync(cfg: Dict[str, Any], lib: Library, store, targets: Sequence[
     结束时统一 finalize + 写爬取历史。返回 {new, downloaded, failed, records}。
     """
     session = CrawlSession(cfg, lib, verbose=True)
+    if stop_event is not None:
+        session.stop_event = stop_event
+    if progress_cb is not None:
+        session.progress_cb = progress_cb
     session.known = lib.known_ids_fast()
     session.dry_run = dry_run
     pages = int(cfg.get("pages") or 1)
@@ -5966,7 +6020,11 @@ def run_follow_sync(cfg: Dict[str, Any], lib: Library, store, targets: Sequence[
     log("=" * 68)
 
     total_new = total_down = total_fail = 0
-    for a in targets:
+    for a_idx, a in enumerate(targets, 1):
+        if session.should_stop():
+            log("[停止] 用户请求停止，跳过剩余画师")
+            break
+        session.report(stage="follow", done=a_idx, total=len(targets), detail=a.label())
         try:
             stats = session.crawl_artist(a.artist_id, name=a.name, max_works=max_works,
                                          pages=pages, dry_run=dry_run, order=order)
@@ -6757,11 +6815,23 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
 
     fbtns = ttk.Frame(tab_follow, padding=(0, 8, 0, 0))
     fbtns.pack(fill="x")
-    ttk.Button(fbtns, text="同步全部（增量下载）", command=lambda: start_follow_sync()).pack(side="left")
+    ttk.Button(fbtns, text="同步选中", command=lambda: start_follow_sync(only_selected=True)).pack(side="left")
+    ttk.Button(fbtns, text="同步全部（增量下载）",
+               command=lambda: start_follow_sync(only_selected=False)).pack(side="left", padx=6)
+    ttk.Button(fbtns, text="停止", command=lambda: stop_follow()).pack(side="left", padx=6)
     ttk.Button(fbtns, text="打开追更清单文件",
                command=lambda: open_path(
                    L["lib"].root / artists_mod.ARTISTS_FILENAME)).pack(side="left", padx=6)
     ttk.Label(fbtns, textvariable=follow_status_var, foreground="#666").pack(side="right")
+
+    # 追更页进度行
+    f_prog_row = ttk.Frame(tab_follow, padding=(0, 4, 0, 0))
+    f_prog_row.pack(fill="x")
+    f_prog = ttk.Progressbar(f_prog_row, maximum=100, value=0, length=320)
+    f_prog.pack(side="left", fill="x", expand=True)
+    f_prog_var = tk.StringVar(value="就绪")
+    ttk.Label(f_prog_row, textvariable=f_prog_var, foreground="#666", width=50,
+              anchor="w").pack(side="left", padx=(8, 0))
 
     f_log = tk.Text(tab_follow, height=8, wrap="none", font=("Consolas", 9))
     f_log.pack(fill="x", pady=(8, 0))
@@ -6844,7 +6914,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             flogln(f"已移除 {removed} 位画师")
         refresh_follows()
 
-    def start_follow_sync(dry_run: bool = False) -> None:
+    def start_follow_sync(dry_run: bool = False, only_selected: bool = True) -> None:
         if L.get("busy"):
             flogln("正在执行其它任务，请稍候")
             return
@@ -6854,25 +6924,62 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         if not _follow_store.artists:
             flogln("追更清单是空的，先添加画师")
             return
+        if only_selected:
+            sel = ftree.selection()
+            if not sel:
+                flogln("请先在清单里选中要同步的画师（或点「同步全部」）")
+                return
+            wanted = {ftree.item(i, "values")[1] for i in sel}
+            targets = [a for a in _follow_store.artists if a.artist_id in wanted]
+        else:
+            targets = list(_follow_store.artists)
         L["busy"] = True
+        L["stop_evt"] = threading.Event()
         follow_status_var.set("正在同步…")
+        f_prog.configure(value=0)
+        f_prog_var.set(f"准备同步 {len(targets)} 位画师…")
         flogln("")
         flogln("=" * 30 + " 开始同步 " + "=" * 30)
-        targets = list(_follow_store.artists)
         dry = bool(dry_run_var.get()) or dry_run
         snap = dict(L["cfg"])
         started = time.time()
+
+        def on_progress(kw: Dict[str, Any]) -> None:
+            msg_q.put(("__FPROG__", kw))
 
         def worker() -> None:
             try:
                 run_follow_sync(snap, L["lib"], _follow_store, targets,
                                 dry_run=dry, order=str(snap.get("order") or "date"),
+                                stop_event=L["stop_evt"], progress_cb=on_progress,
                                 log=lambda m: msg_q.put(("[follow]", m)), started=started)
                 msg_q.put(("__FOLLOW_DONE__", None))
             except Exception as exc:  # noqa: BLE001
                 msg_q.put(("[follow]", f"[error] {type(exc).__name__}: {exc}"))
                 msg_q.put(("__FOLLOW_DONE__", None))
         threading.Thread(target=worker, daemon=True).start()
+
+    def stop_follow() -> None:
+        evt = L.get("stop_evt")
+        if not L.get("busy") or evt is None:
+            follow_status_var.set("当前没有运行中的同步")
+            return
+        evt.set()
+        follow_status_var.set("已请求停止，正在保存…（下次同步自动续跑）")
+        f_prog_var.set("正在停止…")
+
+    def _render_follow_progress(kw: Dict[str, Any]) -> None:
+        stage = kw.get("stage")
+        done = int(kw.get("done") or 0)
+        total = int(kw.get("total") or 1)
+        detail = str(kw.get("detail") or "")
+        if total > 0:
+            f_prog.configure(maximum=total, value=done)
+        pct = int(done * 100 / total) if total else 0
+        if stage == "follow":
+            f_prog_var.set(f"画师 {done}/{total}（{pct}%）　{detail[:36]}")
+        else:  # artist / artist_dl
+            f_prog_var.set(f"{detail[:20]}　作品 {done}/{total}（{pct}%）")
 
     refresh_follows()
 
@@ -7791,12 +7898,18 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         L["busy"] = True
         log.delete("1.0", "end")
         status_var.set("正在爬取…")
+        crawl_prog.configure(value=0)
+        crawl_prog_var.set("准备中…")
+        L["stop_evt"] = threading.Event()
         sub_cfg = gui_cfg_snapshot()
         pages, order = int(pages_var.get()), str(order_var.get())
         use_deep, dry = bool(deep_var.get()), bool(dry_var.get())
         r18_levels = sub_cfg.get("r18_levels")
         ai_mode = str(sub_cfg.get("ai_mode") or "all")
         artist_ids = sub_cfg.get("artist_ids") or []
+
+        def on_progress(kw: Dict[str, Any]) -> None:
+            msg_q.put(("__PROG__", kw))
 
         def worker() -> None:
             try:
@@ -7807,6 +7920,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                           deep=use_deep, dry_run=dry,
                           r18_levels=r18_levels, ai_mode=ai_mode,
                           artist_ids=artist_ids,
+                          stop_event=L["stop_evt"], progress_cb=on_progress,
                           log=lambda m: msg_q.put(m))
             except Exception as exc:  # noqa: BLE001
                 msg_q.put(f"[error] {type(exc).__name__}: {exc}")
@@ -7814,6 +7928,31 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                 msg_q.put(DONE)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def stop_crawl() -> None:
+        """停止当前爬取：置位停止事件，工作线程在下一个安全点优雅退出，
+        已下载的图和索引都会保存，下次点「开始爬取」会自动续跑（已下载的跳过）。"""
+        evt = L.get("stop_evt")
+        if not L.get("busy") or evt is None:
+            status_var.set("当前没有运行中的爬取")
+            return
+        evt.set()
+        status_var.set("已请求停止，正在保存…（已下载内容不会丢）")
+        crawl_prog_var.set("正在停止…")
+
+    def _render_crawl_progress(kw: Dict[str, Any]) -> None:
+        """把后台上报的进度渲染到爬取页进度条。kw 来自 CrawlSession.report。"""
+        stage = kw.get("stage")
+        done = int(kw.get("done") or 0)
+        total = int(kw.get("total") or 1)
+        detail = str(kw.get("detail") or "")
+        if total > 0:
+            crawl_prog.configure(maximum=total, value=done)
+        pct = int(done * 100 / total) if total else 0
+        stage_names = {"combo": "搜索组合", "artist": "作品", "artist_scan": "画师",
+                       "artist_dl": "作品", "follow": "画师", "walk": "时间段"}
+        label = stage_names.get(stage, stage)
+        crawl_prog_var.set(f"{label}{done}/{total}（{pct}%）　{detail[:36]}")
 
     def start_estimate() -> None:
         """预估：先算量级再决定要不要爬（只发少量探测请求，不下载任何图片）。"""
@@ -7880,6 +8019,9 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                 if msg == DONE:
                     L["busy"] = False
                     status_var.set("就绪")
+                    crawl_prog.configure(value=0)
+                    crawl_prog_var.set("就绪")
+                    L.pop("stop_evt", None)
                     refresh_list()
                     load_tags()
                     load_dtag_list()
@@ -7891,9 +8033,18 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                     if msg[0] == "[follow]":
                         flogln(msg[1])
                         continue
+                    if msg[0] == "__PROG__":
+                        _render_crawl_progress(msg[1] if len(msg) > 1 else {})
+                        continue
+                    if msg[0] == "__FPROG__":
+                        _render_follow_progress(msg[1] if len(msg) > 1 else {})
+                        continue
                     if msg[0] == "__FOLLOW_DONE__":
                         L["busy"] = False
                         follow_status_var.set("同步完成")
+                        f_prog.configure(value=0)
+                        f_prog_var.set("就绪")
+                        L.pop("stop_evt", None)
                         refresh_follows()
                         refresh_list()
                         load_tags()
@@ -7954,10 +8105,21 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     # 固定到底部：如果按默认"顶部"顺序且不加 side，日志区(fill=both, expand=True)
     # 会把剩余空间全吞掉，按钮行被挤成 1px、看不见（实测踩到）。
     crawl_btns.pack(fill="x", side="bottom")
+
+    # 进度行：进度条 + 当前任务指示（爬取页进度）
+    crawl_prog_row = ttk.Frame(tab_crawl, padding=(0, 0, 0, 4))
+    crawl_prog_row.pack(fill="x", side="bottom")
+    crawl_prog = ttk.Progressbar(crawl_prog_row, maximum=100, value=0, length=320)
+    crawl_prog.pack(side="left", fill="x", expand=True)
+    crawl_prog_var = tk.StringVar(value="就绪")
+    ttk.Label(crawl_prog_row, textvariable=crawl_prog_var, foreground="#666",
+              width=46, anchor="w").pack(side="left", padx=(8, 0))
+
     ttk.Button(crawl_btns, text="开始爬取", command=start_crawl).pack(side="left")
     # 预估排在"开始爬取"旁边 —— 建议先点它看看量级（几 MB 还是几 TB）
     est_btn = ttk.Button(crawl_btns, text="预估（建议先点）", command=start_estimate)
     est_btn.pack(side="left", padx=(6, 0))
+    ttk.Button(crawl_btns, text="停止", command=lambda: stop_crawl()).pack(side="left", padx=(10, 0))
     ttk.Label(crawl_btns, textvariable=status_var).pack(side="left", padx=12)
     ttk.Button(crawl_btns, text="打开图库目录",
                command=lambda: open_path(L["lib"].root)).pack(side="right", padx=2)
