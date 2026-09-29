@@ -1,4 +1,4 @@
-# pixiv 关键词爬虫（原图下载 + 可检索分类库）
+﻿# pixiv 关键词爬虫（原图下载 + 可检索分类库）
 
 > ## 🧪 测试版（BETA）
 >
@@ -15,7 +15,7 @@
 
 | 方式 | 适合谁 | 怎么用 |
 | --- | --- | --- |
-| 🖥 **图形界面 exe**（测试版发布形态） | 不想碰命令行的用户 | 下载 [GitHub Release](https://github.com/leerogerstheman/pixiv-crawler/releases) 里的 `PixivCrawler-windows.zip`，解压后双击 `PixivCrawler.exe` |
+| 🖥 **图形界面 exe**（测试版发布形态） | 不想碰命令行的用户 | 下载 [GitHub Release](https://github.com/leerogerstheman/LeebertyPixiv/releases) 里的 `PixivCrawler-windows.zip`，解压后双击 `PixivCrawler.exe` |
 | 🪟 ** gui.bat** | 已装 Python 的用户 | 双击 `gui.bat`（自动找 Python） |
 | 💻 命令行 | 喜欢命令行的用户 | 见下方命令 |
 | 🐍 源码运行 | 开发者 / 想改代码 | `python pixiv_crawler.py gui` |
@@ -709,3 +709,4 @@ date_d + s_tag                       180     180    100%
 - 本程序仅按你的关键词抓取 pixiv 公开页面上可访问的图片，**图片版权属于各位画师**，请用于个人离线浏览与检索，不要二次发布或商用。
 - 请勿把限速调得过高、不要长时间大并发抓取；尊重 pixiv 的使用条款与画师的意愿（画师在简介中注明禁止转载/保存的，请遵守）。
 - 建议只收自己真正想看的：`--limit`、`max_pages_per_work` 都能帮你控制规模。
+
