@@ -1,0 +1,38 @@
+# ---- 凭据：绝对不要提交 ----
+config.json
+credentials.json
+.pixiv_crawler/
+.login_profile/
+.login_profile_probe/
+*.cookie
+*.token
+
+# ---- 下载下来的图库 ----
+library/
+**/library/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 临时文件 ----
+*.part
+*.tmp
+*.log
+_*_tmp.py
+_probe_*.py
+_test_*.py
