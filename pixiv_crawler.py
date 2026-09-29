@@ -7127,8 +7127,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         rel = tree.item(sel[0], "values")[9]
         p = L["lib"].root / str(rel).replace("/", os.sep)
         vals = tree.item(sel[0], "values")
-        # 元信息
-        info = (f"ID {vals[0]}　{vals[1]}\n画师 {vals[2]}\n"
+        # 元信息（ID 列可能带「×N页」标记，预览里还原纯 ID）
+        info = (f"ID {str(vals[0]).split('×', 1)[0]}　{vals[1]}\n画师 {vals[2]}\n"
                 f"发布于 {vals[7]}　大小 {vals[8]}\n文件 {rel}")
         preview_info_var.set(info)
         # 缩略图：tkinter 的 PhotoImage 原生支持 PNG/GIF，不需要第三方库。
@@ -7207,7 +7207,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             messagebox.showinfo("提示", "请先在结果里选中一行（一行=一个作品的某一页）")
             return
         vals = tree.item(sel[0], "values")
-        work_id = str(vals[0])
+        # ID 列可能带「×N页」多页标记，先还原成纯 ID
+        work_id = str(vals[0]).split("×", 1)[0]
         rec = next((r for r in L["recs"] if str(r.get("id")) == work_id), None)
         if rec is None:
             messagebox.showinfo("提示", f"找不到作品 {work_id} 的记录")
@@ -7306,15 +7307,35 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             sort_by=q_sort_var.get(),
         )
         tree.delete(*tree.get_children())
+        # 多页标记：同一作品在当前结果里出现几页，就在 ID 列标注「×N页」，避免看起来像重复记录
+        page_counts: Dict[str, int] = {}
+        for r in hits:
+            iid = str(r.get("id") or "")
+            page_counts[iid] = page_counts.get(iid, 0) + 1
         for r in hits:
             dt = "、".join(str(t) for t in (r.get("d_tags") or [])[:3]) or "—"
+            iid = str(r.get("id") or "")
+            id_label = f"{iid}×{page_counts[iid]}页" if page_counts.get(iid, 0) > 1 else iid
             tree.insert("", "end", values=(
-                r.get("id"), r.get("title"), r.get("author"),
+                id_label, r.get("title"), r.get("author"),
                 "、".join(str(t) for t in (r.get("tags") or [])[:6]), dt,
                 as_int(r.get("like_count"), 0), as_int(r.get("bookmark_count"), 0),
                 str(r.get("create_date") or "")[:10],
                 format_size(as_int(r.get("bytes"), 0)), r.get("file")))
-        lib_status_var.set(f"命中 {len(hits)} 条 / 图库共 {len(recs)} 条")
+        base = f"命中 {len(hits)} 条 / 图库共 {len(recs)} 条"
+        # 分级隐藏提示：当前分级过滤掉了多少条（用户看不到的）
+        if q_r18_var.get() != "all":
+            hits_all = search_records_advanced(
+                recs, r18_mode="all",
+                text=q_text_var.get() or "",
+                author_ids=[w for w in re.split(r"[\s,，]+", q_aid_var.get().strip()) if w],
+                d_tags=[t.rsplit("　(", 1)[0] for t in selected_dtags()],
+                tags=[t.rsplit("　(", 1)[0] for t in selected_tags()],
+            )
+            hidden = len(hits_all) - len(hits)
+            if hidden > 0:
+                base += f"　｜　另有 {hidden} 条被分级隐藏（当前只看全年龄，改「全年龄+R-18」可见）"
+        lib_status_var.set(base)
 
     def reset_search() -> None:
         q_text_var.set("")
@@ -7413,6 +7434,16 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         L["recs"] = recs
         works = len({str(r.get("id")) for r in recs})
         total = sum(as_int(r.get("bytes"), 0) for r in recs)
+        # 记录 vs 作品 的解释：记录=一张图，作品=一个 pixiv 作品（多页漫画算多张图）
+        multi_note = ""
+        if recs:
+            per = len(recs) / max(1, works)
+            if per != 1.0:
+                from collections import Counter
+                counts = Counter(str(r.get("id")) for r in recs)
+                multi = sum(1 for c in counts.values() if c > 1)
+                multi_note = (f"\n记录按「图」计、作品按「pixiv 作品」计：平均每个作品 {per:.1f} 页，"
+                              f"其中 {multi} 个多页作品")
         try:
             free = format_size(shutil.disk_usage(native_path(L["lib"].root)).free)
         except OSError:
@@ -7422,7 +7453,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             f"目录存在：{'是' if exists else '否（改成新位置后会自动创建）'}\n"
             f"记录 {len(recs)} 条 / 作品 {works} 个 / 原图 {format_size(total)}\n"
             f"所在磁盘剩余空间：{free}\n"
-            f"索引文件：{L['lib'].md_path if os.path.isfile(native_path(L['lib'].md_path)) else '（尚未生成）'}")
+            f"索引文件：{L['lib'].md_path if os.path.isfile(native_path(L['lib'].md_path)) else '（尚未生成）'}"
+            + multi_note)
         lib_count_var.set(f"记录：{len(recs)}")
         load_tags()
         load_dtag_list()
@@ -8134,8 +8166,11 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                         run_search()
                         refresh_history_tab()
                         # 同步完成后跳转到「图库检索」页，自动按这批画师筛选，
-                        # 让用户立刻看到刚同步下来的作品（干跑时不跳）
+                        # 让用户立刻看到刚同步下来的作品（干跑时不跳）。
+                        # 关键：先清空上次的检索词/标签/时间/人气/分级，否则旧筛选
+                        # 会叠加在画师筛选上，可能显示 0 条，让用户误以为同步失败。
                         if L.get("goto_search_after_follow") and L.get("last_sync_artists"):
+                            reset_search()
                             q_aid_var.set(", ".join(L["last_sync_artists"]))
                             nb.select(nb.tabs()[2])
                             run_search()
