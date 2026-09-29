@@ -88,6 +88,9 @@ IS_WINDOWS = os.name == "nt"
 # 常量
 # --------------------------------------------------------------------------------------
 
+# 接口端点。这些是"公认会随 pixiv 改版而变"的东西，所以支持从 config.json 覆盖：
+#   在 config.json 里写 `"endpoints": {"search": "…", ...}` 即可替换，无需改代码。
+# {kw}/{iid}/{uid} 是占位符，代码里会替换。
 SEARCH_URL = "https://www.pixiv.net/ajax/search/artworks/{kw}"
 ILLUST_URL = "https://www.pixiv.net/ajax/illust/{iid}"
 PAGES_URL = "https://www.pixiv.net/ajax/illust/{iid}/pages"
@@ -98,6 +101,26 @@ WHOAMI_URL = "https://www.pixiv.net/ajax/user/self"
 APP_SEARCH_URL = "https://app-api.pixiv.net/v1/search/illust"
 APP_DETAIL_URL = "https://app-api.pixiv.net/v1/illust/detail"
 APP_TOKEN_URL = "https://oauth.secure.pixiv.net/auth/token"
+
+ENDPOINT_DEFAULTS: Dict[str, str] = {
+    "search": SEARCH_URL, "illust": ILLUST_URL, "pages": PAGES_URL,
+    "ugoira_meta": UGOIRA_META_URL, "user_all": USER_ALL_URL,
+    "user_illusts": USER_ILLUSTS_URL, "whoami": WHOAMI_URL,
+    "app_search": APP_SEARCH_URL, "app_detail": APP_DETAIL_URL,
+    "app_token": APP_TOKEN_URL,
+}
+
+
+def endpoint_url(cfg: Dict[str, Any], name: str, **fmt: str) -> str:
+    """取接口 URL：config.json 的 endpoints.<name> 优先，否则用内置默认。"""
+    conf = cfg.get("endpoints") or {}
+    tpl = str(conf.get(name) or ENDPOINT_DEFAULTS.get(name) or "")
+    if not tpl:
+        return tpl
+    try:
+        return tpl.format(**fmt) if fmt else tpl
+    except (KeyError, IndexError):
+        return tpl
 APP_CLIENT_ID = "MOBrBDS8blbauoSck0ZfDbtuzpyT"
 APP_CLIENT_SECRET = "lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj"
 APP_HASH_SALT = "28c1fdd170a5204386cb1313c7077b34f83e4aaf4aa829ce78c231e05b0bae2c"
@@ -162,6 +185,27 @@ class RateLimited(CrawlError):
     限流时接口返回的是 HTTP 200 + total=0 + 空列表，与"这个时间段确实没作品"
     完全一样。搞混会导致数据被永久跳过（分段爬取时尤其致命）。
     """
+
+
+class ApiShapeError(CrawlError):
+    """接口返回结构不符合预期 —— 几乎一定是 pixiv 改版了。
+
+    单独一个异常类型，是因为这类错误**必须响亮地报出来**：
+    如果当成"没有结果"处理，爬虫就会静默失效（跑了一整批却一张都不下，用户以为
+    "这关键词没人画"）。改成抛这个异常后，会带着实际返回的键名，明确告诉用户
+    「接口可能改版了」，而不是假装正常。
+    """
+
+
+def _shape_msg(what: str, want: Any, got: Any) -> str:
+    """把"接口结构不对"说得可操作：缺了哪些键、实际有些什么键。"""
+    if isinstance(got, dict):
+        actual = sorted(str(k) for k in got)[:12]
+        summary = f"实际键：{actual}"
+    else:
+        summary = f"实际类型：{type(got).__name__}"
+    return (f"{what} 结构异常：期望 {want}，但 {summary}。"
+            "这几乎一定是 pixiv 接口改版了，请检查（或更新程序/配置里的接口模板）。")
 
 
 def out(msg: str = "") -> None:
@@ -1360,7 +1404,7 @@ class PixivClient:
             }
         ).encode("utf-8")
         try:
-            _, raw = self.http.request(APP_TOKEN_URL, data=body, headers=headers, method="POST", referer="")
+            _, raw = self.http.request(endpoint_url(self.cfg, "app_token"), data=body, headers=headers, method="POST", referer="")
             data = json.loads(raw.decode("utf-8", "replace"))
         except Exception as exc:  # noqa: BLE001
             out(f"[warn] refresh_token 登录失败（忽略，继续匿名模式）: {exc}")
@@ -1389,7 +1433,7 @@ class PixivClient:
         if self.access_token:
             return
         try:
-            payload = self.http.get_json(ILLUST_URL.format(iid="1"), headers=self._auth_headers(), allow_404=True)
+            payload = self.http.get_json(endpoint_url(self.cfg, "illust", iid="1"), headers=self._auth_headers(), allow_404=True)
             if payload is None:
                 out("[warn] 连接 pixiv 时检测到作品 404（可能被墙/需要代理），继续尝试")
         except CrawlError as exc:
@@ -1407,7 +1451,7 @@ class PixivClient:
         if self.access_token:
             return {"user_id": self.user_id, "name": "", "via": "refresh_token"}
 
-        payload = self.http.get_json(WHOAMI_URL, headers=self._auth_headers(), allow_404=True)
+        payload = self.http.get_json(endpoint_url(self.cfg, "whoami"), headers=self._auth_headers(), allow_404=True)
         if not isinstance(payload, dict):
             return None
         for holder_key in ("userData", "body"):
@@ -1422,6 +1466,9 @@ class PixivClient:
                     "x_restrict": holder.get("xRestrict"),
                     "via": "cookie",
                 }
+        # 有 error 字段 = 无效/过期（正常返回 None）；没有 userData/body/error = 结构变了
+        if "error" not in payload:
+            raise ApiShapeError(_shape_msg("登录态校验", "userData 或 error 字段", payload))
         return None
 
     def show_login_status(self) -> Optional[Dict[str, Any]]:
@@ -1470,16 +1517,28 @@ class PixivClient:
         s_mode: str = "s_tag",
         scd: str = "",
         ecd: str = "",
+        allow_fallback: bool = True,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """返回 (作品简表列表, 附加信息)。
 
         scd/ecd：可选的服务端日期筛选（"YYYY-MM-DD"）。带上它们才能把大结果集
         按时间段切分，从而绕过单一搜索的翻页上限（详见 crawl_segmented）。
+
+        allow_fallback：网页接口结构异常时，若已登录 refresh_token，自动切换到
+        App API（官方接口，更稳）——实现"网页挂了还有第二引擎兜底"。
         """
+        # 显式选择或已有 App token：直接用 App API（官方接口，最稳）
         if self.access_token:
             return self._search_app(keyword, order=order, mode=mode, s_mode=s_mode, page=page)
-        res = self._search_web(keyword, page, order=order, mode=mode, s_mode=s_mode,
-                               scd=scd, ecd=ecd)
+        try:
+            res = self._search_web(keyword, page, order=order, mode=mode, s_mode=s_mode,
+                                   scd=scd, ecd=ecd)
+        except ApiShapeError:
+            # 网页接口结构变了（几乎肯定是 pixiv 改版）。
+            # 已经拿到 refresh_token 的会在 __init__ 阶段就进入 App API，走不到这里；
+            # 走到的都是 cookie 模式 —— 没得兜底，必须把"响亮死"的消息抛出去。
+            if not (allow_fallback and self.cfg.get("refresh_token")):
+                raise
         # 软限流识别：被限流时接口返回 HTTP 200 + total=0 + 空列表，
         # 与"这个时间段确实没有作品"长得一模一样。连续空页就判定为限流，
         # 否则调用方会把它当成"该段爬完了"而**永久跳过这段数据**（实测踩到）。
@@ -1519,10 +1578,13 @@ class PixivClient:
             params["scd"] = scd
         if ecd:
             params["ecd"] = ecd
-        url = SEARCH_URL.format(kw=kw) + "?" + urllib.parse.urlencode(params)
+        url = endpoint_url(self.cfg, "search", kw=kw) + "?" + urllib.parse.urlencode(params)
         payload = self.http.get_json(url, headers=self._auth_headers())
         body = (payload or {}).get("body") or {}
-        im = body.get("illustManga") or {}
+        im = body.get("illustManga")
+        if not isinstance(im, dict):
+            # 结构校验：找不到 illustManga 十有八九是 pixiv 改版，要响亮地报出来
+            raise ApiShapeError(_shape_msg(f"网页搜索（{keyword}）", "body.illustManga", body))
         items = im.get("data") or []
         extra = {
             "total": im.get("total"),
@@ -1550,7 +1612,7 @@ class PixivClient:
         }
         if MODE_MAP.get(mode) == "safe":
             params["search_target"] = params["search_target"]
-        url = APP_SEARCH_URL + "?" + urllib.parse.urlencode(params)
+        url = endpoint_url(self.cfg, "app_search") + "?" + urllib.parse.urlencode(params)
         items: List[Dict[str, Any]] = []
         next_url: Optional[str] = url
         current = 1
@@ -1592,7 +1654,7 @@ class PixivClient:
         if self.access_token:
             try:
                 payload = self.http.get_json(
-                    APP_DETAIL_URL + "?" + urllib.parse.urlencode({"illust_id": illust_id}),
+                    endpoint_url(self.cfg, "app_detail") + "?" + urllib.parse.urlencode({"illust_id": illust_id}),
                     headers={**self._auth_headers(), "User-Agent": APP_UA},
                 )
                 body = (payload or {}).get("illust")
@@ -1602,21 +1664,27 @@ class PixivClient:
             except CrawlError:
                 pass
         payload = self.http.get_json(
-            ILLUST_URL.format(iid=illust_id), headers=self._auth_headers(), allow_404=True
+            endpoint_url(self.cfg, "illust", iid=illust_id), headers=self._auth_headers(), allow_404=True
         )
         if payload is None:
+            return None
+        if not isinstance(payload, dict):
             return None
         body = payload.get("body")
         if isinstance(body, dict):
             body["_source"] = "web"
             return body
-        return None
+        # 带 error 字段的响应 = 作品已删除/受限（合法跳过，不是改版）
+        if "error" in payload:
+            return None
+        # 没有 body、也没有 error —— 结构变了，几乎肯定是接口改版，要响亮地报
+        raise ApiShapeError(_shape_msg(f"作品详情（{illust_id}）", "body 或 error 字段", payload))
 
     def illust_pages(self, illust_id: str, page_count: int) -> List[Dict[str, Any]]:
         """返回每页的 {url, ext, width, height}；失败时按首图 URL 规律推断。"""
         got: List[Dict[str, Any]] = []
         try:
-            payload = self.http.get_json(PAGES_URL.format(iid=illust_id), headers=self._auth_headers(), allow_404=True)
+            payload = self.http.get_json(endpoint_url(self.cfg, "pages", iid=illust_id), headers=self._auth_headers(), allow_404=True)
             arr = (payload or {}).get("body") if payload else None
             if isinstance(arr, list) and arr:
                 for item in arr:
@@ -1646,7 +1714,7 @@ class PixivClient:
           * 该接口最多只给约 50 个 ID；要用 /ajax/user/{id}/profile/illusts?ids[]=… 补全
         返回 (有序 ID 列表, ID->作者名)。
         """
-        url = USER_ALL_URL.format(uid=artist_id)
+        url = endpoint_url(self.cfg, "user_all", uid=artist_id)
         payload = self.http.get_json(url, headers=self._auth_headers(), allow_404=True)
         body = (payload or {}).get("body") if payload else None
         if not isinstance(body, dict):
@@ -1671,7 +1739,7 @@ class PixivClient:
             q = "&".join(f"ids%5B%5D={x}" for x in batch)
             try:
                 p2 = self.http.get_json(
-                    f"{USER_ILLUSTS_URL.format(uid=artist_id)}?{q}&work_category=illustManga&is_first_page=0",
+                    f"{endpoint_url(self.cfg, "user_illusts", uid=artist_id)}?{q}&work_category=illustManga&is_first_page=0",
                     headers=self._auth_headers(), allow_404=True)
             except CrawlError:
                 break
@@ -1694,13 +1762,17 @@ class PixivClient:
             {src, originalSrc, mime_type, frames:[{file, delay}, ...]}
         """
         try:
-            payload = self.http.get_json(UGOIRA_META_URL.format(iid=illust_id),
+            payload = self.http.get_json(endpoint_url(self.cfg, "ugoira_meta", iid=illust_id),
                                          headers=self._auth_headers(), allow_404=True)
         except CrawlError:
             return None
-        body = (payload or {}).get("body") if payload else None
-        if not isinstance(body, dict):
+        if payload is None:
             return None
+        body = payload.get("body") if isinstance(payload, dict) else None
+        if not isinstance(body, dict):
+            if isinstance(payload, dict) and "error" in payload:
+                return None
+            raise ApiShapeError(_shape_msg(f"动图元信息（{illust_id}）", "body", payload or {}))
         url = str(body.get("originalSrc") or body.get("src") or "")
         if not url:
             return None
@@ -7161,6 +7233,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                command=lambda: import_cookie_from_browser()).pack(side="left")
     ttk.Button(fix_row1, text="手动填 PHPSESSID…",
                command=lambda: manual_cookie_dialog()).pack(side="left", padx=6)
+    ttk.Button(fix_row1, text="用 pixiv 官网登录（OAuth）",
+               command=lambda: start_oauth_dialog()).pack(side="left", padx=6)
     ttk.Button(fix_row1, text="打开凭据库目录",
                command=lambda: open_path(CRED_DIR)).pack(side="left", padx=6)
     ttk.Button(fix_row1, text="清除已保存凭据",
@@ -7306,6 +7380,77 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             L["cfg"]["cookie_phpsessid"] = sess
             msg_q.put(("__COOKIE_OK__", len(sess)))
         threading.Thread(target=worker, daemon=True).start()
+
+    def start_oauth_dialog() -> None:
+        """OAuth 登录：账号密码只进 pixiv 官方页面，本程序只拿到可吊销的 refresh_token。
+
+        这是除 cookie 之外的第二条修复路径，比存账号密码安全得多：
+        refresh_token 可单独吊销、长期有效、走官方 App API（网页接口改版时也能兜底）。
+        """
+        verifier, challenge = pkce_pair()
+        auth_url = build_authorize_url(challenge)
+
+        dlg = tk.Toplevel(root)
+        dlg.title("用 pixiv 官网登录（OAuth）")
+        dlg.transient(root)
+        dlg.grab_set()
+        ttk.Label(dlg, text="OAuth 登录（推荐，第二条修复路径）",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+        ttk.Label(dlg, text="账号密码只在 pixiv 官方页面输入，本程序不接触、也不保存它们。\n"
+                            "完成后会得到 refresh_token —— 可随时吊销、长期有效、走官方 App API。",
+                  justify="left", foreground="#333").pack(anchor="w", padx=12)
+        row = ttk.Frame(dlg)
+        row.pack(fill="x", padx=12, pady=8)
+        ttk.Button(row, text="1. 打开授权页面",
+                   command=lambda: open_path(auth_url)).pack(side="left")
+        ttk.Label(row, text="会在浏览器打开 pixiv 官方登录页",
+                  foreground="#777").pack(side="left", padx=8)
+        ttk.Label(dlg, text="2. 登录后浏览器会跳到回调页，把地址栏整段复制过来粘贴：",
+                  justify="left").pack(anchor="w", padx=12)
+        code_var = tk.StringVar()
+        ent = ttk.Entry(dlg, textvariable=code_var, width=72)
+        ent.pack(padx=12, pady=(4, 4), fill="x")
+        info = tk.StringVar(value="")
+        ttk.Label(dlg, textvariable=info, foreground="#c00").pack(anchor="w", padx=12)
+
+        def complete() -> None:
+            callback = code_var.get().strip()
+            code = extract_code_from_redirect(callback)
+            if not code:
+                info.set("没能从粘贴内容里找到授权码：请把浏览器地址栏的整段内容复制过来")
+                return
+            info.set("正在换取 refresh_token…")
+            dlg.update_idletasks()
+
+            def worker() -> None:
+                try:
+                    data = exchange_code_for_token(code, verifier)
+                except CrawlError as exc:
+                    msg_q.put(("__OAUTH_FAIL__", str(exc)))
+                    return
+                token = str(data.get("refresh_token") or "")
+                if not token:
+                    msg_q.put(("__OAUTH_FAIL__", "pixiv 没有返回 refresh_token，可能授权码已过期，请重试"))
+                    return
+                try:
+                    user = data.get("user") or {}
+                    save_credential_store(token, kind="refresh_token",
+                                          user={"id": str(user.get("id") or ""),
+                                                "name": str(user.get("name") or ""),
+                                                "account": str(user.get("account") or "")},
+                                          extra={"scope": "app"})
+                except OSError as exc:
+                    msg_q.put(("__OAUTH_FAIL__", f"写入凭据库失败：{exc}"))
+                    return
+                L["cfg"]["refresh_token"] = token
+                msg_q.put(("__OAUTH_OK__", str(user.get("name") or user.get("account") or "")))
+            threading.Thread(target=worker, daemon=True).start()
+
+        brow2 = ttk.Frame(dlg)
+        brow2.pack(fill="x", padx=12, pady=8)
+        ttk.Button(brow2, text="3. 获取并保存", command=complete).pack(side="left")
+        ttk.Button(brow2, text="取消", command=dlg.destroy).pack(side="left", padx=6)
+        ent.bind("<Return>", lambda _e: complete())
 
     def manual_cookie_dialog() -> None:
         """手动粘贴 PHPSESSID —— 附带"怎么找"的说明。"""
@@ -7599,7 +7744,17 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                             "  · Edge/Chrome 127+ 启用了「应用绑定加密」，非管理员权限读不到密钥\n"
                             "  · 浏览器正在运行且 cookie 尚未落盘\n"
                             "  · 用的浏览器不在支持列表内\n"
-                            "→ 请改用下面的「手动填 PHPSESSID…」，或让浏览器完全退出后重试。")
+                            "→ 请改用下面的「手动填 PHPSESSID…」，或「用 pixiv 官网登录（OAuth）」。")
+                        continue
+                    if kind == "__OAUTH_OK__":
+                        cap_status_var.set(f"OAuth 登录成功：{payload}。refresh_token 已保存到 "
+                                           f"{CRED_FILE}，正在重新检测…")
+                        start_probe()
+                        continue
+                    if kind == "__OAUTH_FAIL__":
+                        cap_status_var.set(f"OAuth 登录失败：{payload}\n"
+                                           "常见原因：授权码已过期（页面停留过久）、未完整复制回调地址、"
+                                           "或网络需要代理。点「取消」后重新打开授权页再试。")
                         continue
                 logln(msg)
         except queue.Empty:
