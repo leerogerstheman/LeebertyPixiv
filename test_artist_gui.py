@@ -97,6 +97,11 @@ check("找到画师ID输入框（宽度18）", aid_entry2 is not None,
 trees = []
 find(root, tk.ttk.Treeview, trees)
 tree = trees[0]
+# 切到检索页后等初始检索完成（run_search 是经 event loop 异步触发的，直接量会是 0）
+for _ in range(40):
+    flush(3)
+    if len(tree.get_children()) > 0:
+        break
 before = len(tree.get_children())
 print(f"  未填画师时的结果数：{before}")
 if aid_entry2 is not None:

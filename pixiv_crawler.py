@@ -6686,7 +6686,10 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
 
     mid = ttk.Frame(tab_crawl)
     mid.pack(fill="both", expand=True, padx=0)
-    log = tk.Text(mid, height=16, wrap="none", font=("Consolas", 9))
+    # 高度别设太大：爬取页上面有 3 段筛选控件，日志若默认 16 行(约240px)+筛选+按钮行
+    # 会超过窗口高度；好在按钮行已用 side="bottom" 固定到底部（见 crawl_btns），
+    # 超出的部分只会压缩日志区，按钮始终可见（实测踩过"按钮被挤成 1px"）。
+    log = tk.Text(mid, height=10, wrap="none", font=("Consolas", 9))
     log.grid(row=0, column=0, sticky="nsew")
     sb = ttk.Scrollbar(mid, command=log.yview)
     sb.grid(row=0, column=1, sticky="ns")
@@ -7762,7 +7765,9 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         root.after(120, pump)
 
     crawl_btns = ttk.Frame(tab_crawl, padding=(0, 4, 0, 0))
-    crawl_btns.pack(fill="x")
+    # 固定到底部：如果按默认"顶部"顺序且不加 side，日志区(fill=both, expand=True)
+    # 会把剩余空间全吞掉，按钮行被挤成 1px、看不见（实测踩到）。
+    crawl_btns.pack(fill="x", side="bottom")
     ttk.Button(crawl_btns, text="开始爬取", command=start_crawl).pack(side="left")
     # 预估排在"开始爬取"旁边 —— 建议先点它看看量级（几 MB 还是几 TB）
     est_btn = ttk.Button(crawl_btns, text="预估（建议先点）", command=start_estimate)
