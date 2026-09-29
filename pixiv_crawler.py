@@ -6933,6 +6933,9 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             targets = [a for a in _follow_store.artists if a.artist_id in wanted]
         else:
             targets = list(_follow_store.artists)
+        # 记录本次同步画师，供完成后跳到检索页自动筛选展示
+        L["last_sync_artists"] = [a.artist_id for a in targets]
+        L["goto_search_after_follow"] = not dry
         L["busy"] = True
         L["stop_evt"] = threading.Event()
         follow_status_var.set("正在同步…")
@@ -7100,6 +7103,60 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
     res_frame.rowconfigure(0, weight=1)
     res_frame.columnconfigure(0, weight=1)
+
+    # ---- 预览面板：选中行即显示缩略图（PNG/GIF）+ 元信息 ----
+    # tkinter 的 PhotoImage 只支持 PNG/GIF，JPG/WebP 等显示占位提示（零依赖原则）。
+    preview_frame = ttk.LabelFrame(tab_lib, text="预览（单击行查看；双击打开）", padding=6)
+    preview_frame.pack(fill="x", pady=(6, 0))
+    preview_row = ttk.Frame(preview_frame)
+    preview_row.pack(fill="x")
+    preview_img = ttk.Label(preview_row, text="（选择一行后这里显示缩略图；PNG/GIF 可预览，JPG 等请双击打开）",
+                            foreground="#888", anchor="w", width=60)
+    preview_img.pack(side="left", fill="x", expand=True)
+    preview_info_var = tk.StringVar(value="")
+    ttk.Label(preview_row, textvariable=preview_info_var, foreground="#333",
+              justify="left", width=46, anchor="w").pack(side="left", padx=(8, 0))
+
+    def refresh_preview(*_a: Any) -> None:
+        """选中行 -> 更新预览缩略图与元信息。"""
+        sel = tree.selection()
+        preview_info_var.set("")
+        if not sel:
+            preview_img.configure(image="", text="（选择一行后这里显示缩略图）")
+            return
+        rel = tree.item(sel[0], "values")[9]
+        p = L["lib"].root / str(rel).replace("/", os.sep)
+        vals = tree.item(sel[0], "values")
+        # 元信息
+        info = (f"ID {vals[0]}　{vals[1]}\n画师 {vals[2]}\n"
+                f"发布于 {vals[7]}　大小 {vals[8]}\n文件 {rel}")
+        preview_info_var.set(info)
+        # 缩略图：tkinter 的 PhotoImage 原生支持 PNG/GIF，不需要第三方库。
+        # JPG/WebP 等 tk 不支持内嵌显示，提示双击用系统看图器打开（零依赖原则）。
+        try:
+            fmt = str(p.suffix).lower()
+            if not p.exists():
+                preview_img.configure(image="", text="（文件不存在）")
+                return
+            if fmt in (".png", ".gif"):
+                from tkinter import PhotoImage as _PhotoImage
+                im = _PhotoImage(file=native_path(p))
+                # 按整数倍数缩小，避免塞满面板
+                w, h = im.width(), im.height()
+                while w > 360 or h > 220:
+                    im = im.subsample(2, 2)
+                    w, h = im.width(), im.height()
+                L["_preview_ref"] = im            # 防止被 GC
+                preview_img.configure(image=im, text="")
+            else:
+                L.pop("_preview_ref", None)
+                preview_img.configure(image="", text=f"（{fmt[1:].upper()} 格式：tkinter 不支持内嵌预览，双击打开）")
+        except Exception as exc:  # noqa: BLE001
+            L.pop("_preview_ref", None)
+            preview_img.configure(image="", text=f"（预览失败：{type(exc).__name__}）")
+
+    tree.bind("<<TreeviewSelect>>", refresh_preview)
+    tree.bind("<Double-1>", lambda _e: open_selected())
 
     lib_status_var = tk.StringVar(value="就绪")
     brow = ttk.Frame(tab_lib, padding=(0, 4, 0, 0))
@@ -8051,6 +8108,14 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                         load_dtag_list()
                         run_search()
                         refresh_history_tab()
+                        # 同步完成后跳转到「图库检索」页，自动按这批画师筛选，
+                        # 让用户立刻看到刚同步下来的作品（干跑时不跳）
+                        if L.get("goto_search_after_follow") and L.get("last_sync_artists"):
+                            q_aid_var.set(", ".join(L["last_sync_artists"]))
+                            nb.select(nb.tabs()[2])
+                            run_search()
+                        L.pop("goto_search_after_follow", None)
+                        L.pop("last_sync_artists", None)
                         continue
                     kind, payload = msg
                     if kind == "__PROBE_TICK__":
