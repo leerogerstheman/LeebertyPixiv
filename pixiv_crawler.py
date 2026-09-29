@@ -2394,6 +2394,7 @@ class Library:
                     continue
                 if isinstance(obj, dict):
                     recs.append(obj)
+        merge_dtags(recs, self.index_dir)   # 衍生标签只在读取时合并
         return recs
 
     def known_ids(self) -> Dict[str, int]:
@@ -2771,22 +2772,26 @@ def search_records_advanced(
     min_bookmarks: int = 0,
     r18_mode: str = "hide",
     ai_mode: str = "all",
+    d_tags: Sequence[str] = (),
+    d_tags_match_all: bool = True,
     limit: int = 0,
     sort_by: str = "default",
 ) -> List[Dict[str, Any]]:
     """带完整筛选维度的检索（图形界面的库检索面板与 CLI 共用）。
 
     与 search_records 的区别：支持发布时间范围、点赞/收藏门槛、R-18 分级、
-    标签"全含/任一"两种匹配方式，以及排序。
+    标签"全含/任一"两种匹配方式、衍生标签筛选，以及排序。
 
     r18_mode: 与爬取页的三个勾选框一一对应（见 R18_MODE_LEVELS）：
               hide=只要全年龄（默认）／no_g=全年龄+R-18／only_r18=只要 R-18
               only_g=只要 R-18G／only_g_mix=全年龄+R-18G／r18_all=R-18+R-18G
               all=全都要／none=都不要
     ai_mode:  all=不限／exclude=排除 AI 生成／only=只要 AI 生成
+    d_tags:   衍生标签筛选（用户自己加的那一层，含自动的「第N次爬取」）
     """
     text_l = (text or "").strip().lower()
     tags_l = [t.strip().lower() for t in tags if t.strip()]
+    d_tags_l = [t.strip().lower() for t in d_tags if t.strip()]
     author_l = author.strip().lower()
     # 画师 ID：精确匹配（库里存的是 author_id），支持传主页链接或纯 ID
     want_aids = {normalize_artist_id(a) for a in author_ids if str(a).strip()}
@@ -2815,6 +2820,14 @@ def search_records_advanced(
                     continue
             elif not any(x in lows for x in tags_l):
                 continue
+        r_dtags = [str(t) for t in (r.get("d_tags") or [])]
+        if d_tags_l:
+            dlow = {t.lower() for t in r_dtags}
+            if d_tags_match_all:
+                if not all(x in dlow for x in d_tags_l):
+                    continue
+            elif not any(x in dlow for x in d_tags_l):
+                continue
         if author_l and author_l not in str(r.get("author") or "").lower():
             continue
         if query_l and query_l != str(r.get("query") or "").lower():
@@ -2830,6 +2843,7 @@ def search_records_advanced(
         if text_l:
             hay = " ".join([
                 str(r.get("title") or ""), str(r.get("author") or ""), " ".join(r_tags),
+                " ".join(r_dtags),
                 " ".join(str(k) for k in (r.get("query_keys") or [])), str(r.get("id") or ""),
                 str(r.get("query") or ""),
                 " ".join(str(v) for v in (r.get("tags_i18n") or {}).values()),
@@ -2860,6 +2874,166 @@ def tag_histogram(recs: Sequence[Dict[str, Any]]) -> List[Tuple[str, int]]:
             s = str(t)
             counter[s] = counter.get(s, 0) + 1
     return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def dtag_histogram(recs: Sequence[Dict[str, Any]]) -> List[Tuple[str, int]]:
+    """统计衍生标签（含自动的「第N次爬取」）及出现次数，按次数从多到少。"""
+    counter: Dict[str, int] = {}
+    for r in recs:
+        for t in r.get("d_tags") or []:
+            s = str(t)
+            counter[s] = counter.get(s, 0) + 1
+    return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+# --------------------------------------------------------------------------------------
+# 衍生标签（dtags）与爬取历史
+#
+# 衍生标签 = 用户自己加在作品上的标签层，与原标签分开存放：
+#     _index/dtags.json            {作品ID: [标签, ...] }   按作品存（一图多页共享）
+#     _index/crawl_history.jsonl   每次爬取一条记录（序号/时间/检索项/结果）
+# 原标签来自 pixiv、不可改；衍生标签可增删，还能一键导入原标签当起点。
+# 「第N次爬取」就是自动附加的衍生标签，N 全局累计，跨关键词/画师/全量/追更共用。
+# --------------------------------------------------------------------------------------
+
+DTAGS_FILE = "dtags.json"
+HISTORY_FILE = "crawl_history.jsonl"
+
+
+def dtags_path(index_dir: Path) -> Path:
+    return Path(index_dir) / DTAGS_FILE
+
+
+def history_path(index_dir: Path) -> Path:
+    return Path(index_dir) / HISTORY_FILE
+
+
+def load_dtags(index_dir: Path) -> Dict[str, List[str]]:
+    """读取衍生标签：{作品ID: [标签...]}。文件不存在返回空。"""
+    data = read_json(dtags_path(index_dir), {}) or {}
+    return {str(k): [str(t) for t in v] for k, v in data.items() if isinstance(v, list)}
+
+
+def work_dtags(index_dir: Path, work_id: Any) -> List[str]:
+    return list(load_dtags(index_dir).get(str(work_id), []))
+
+
+def set_work_dtags(index_dir: Path, work_id: Any, tags: Sequence[str]) -> None:
+    """覆盖某作品的衍生标签（保留顺序，去重）。"""
+    data = load_dtags(index_dir)
+    cleaned = []
+    for t in tags:
+        s = str(t).strip()
+        if s and s not in cleaned:
+            cleaned.append(s)
+    data[str(work_id)] = cleaned
+    atomic_write_json(dtags_path(index_dir), data)
+
+
+def add_work_dtags(index_dir: Path, work_id: Any, tags: Sequence[str]) -> None:
+    """往某作品追加若干衍生标签（已有则跳过）。"""
+    cur = work_dtags(index_dir, work_id)
+    for t in tags:
+        s = str(t).strip()
+        if s and s not in cur:
+            cur.append(s)
+    set_work_dtags(index_dir, work_id, cur)
+
+
+def merge_dtags(recs: Sequence[Dict[str, Any]], index_dir: Path) -> None:
+    """把衍生标签按作品 ID 合并进记录（就地改 dict，不写回 records.jsonl）。
+
+    records.jsonl 里不存衍生标签 —— 它是「原数据」，应保持干净、可重放；
+    衍生标签只在读取时合并，reindex 重建索引也不会丢。
+    """
+    tags = load_dtags(index_dir)
+    for r in recs:
+        r["d_tags"] = list(tags.get(str(r.get("id") or ""), []))
+
+
+def load_crawl_history(index_dir: Path) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    p = history_path(index_dir)
+    if not os.path.isfile(native_path(p)):
+        return entries
+    with open(native_path(p), "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                entries.append(obj)
+    return entries
+
+
+def append_crawl_history(index_dir: Path, entry: Dict[str, Any]) -> None:
+    p = history_path(index_dir)
+    ensure_dir(index_dir)
+    with open(native_path(p), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def next_crawl_ordinal(index_dir: Path) -> int:
+    """全局累计的「第N次爬取」序号：已有历史的最大序号 + 1。"""
+    max_ord = 0
+    for e in load_crawl_history(index_dir):
+        o = as_int(e.get("ordinal"), 0)
+        if o > max_ord:
+            max_ord = o
+    return max_ord + 1
+
+
+def make_auto_tag(ordinal: int, when: Any = None) -> str:
+    """「2026年9月30日第12次爬取」—— 自动附加到本次新下载作品的衍生标签。"""
+    dt = parse_user_date(when) or datetime.now()
+    return f"{dt.year}年{dt.month}月{dt.day}日第{ordinal}次爬取"
+
+
+def finalize_run_record(session: "CrawlSession", lib: "Library", *,
+                        mode: str, keywords: Sequence[str] = (),
+                        artists: Sequence[str] = (),
+                        params: Optional[Dict[str, Any]] = None,
+                        result: Optional[Dict[str, Any]] = None,
+                        started: float = 0.0,
+                        log=out) -> Optional[str]:
+    """爬取收尾：写历史 + 给本次新下载作品附自动标签。
+
+    返回自动标签文本（如「2026年9月30日第12次爬取」）；干跑或没有新作品时返回 None。
+    由 run_crawl / run_full / 追更 sync 在结束时调用，作为统一的「收尾仪式」。
+    """
+    if getattr(session, "dry_run", False) or not session.new_works:
+        return None
+    try:
+        ordinal = next_crawl_ordinal(lib.index_dir)
+        auto_tag = make_auto_tag(ordinal)
+        for wid in sorted(session.new_works):
+            add_work_dtags(lib.index_dir, wid, [auto_tag])
+        entry = {
+            "ordinal": ordinal,
+            "mode": mode or "keyword",
+            "keywords": [str(k) for k in (keywords or [])],
+            "artists": [str(a) for a in (artists or [])],
+            "params": {str(k): str(v) for k, v in (params or {}).items()},
+            "result": {str(k): (int(v) if isinstance(v, (int, float)) and not isinstance(v, bool)
+                                else v) for k, v in (result or {}).items()},
+            "started_at": (datetime.fromtimestamp(started).astimezone().isoformat(
+                timespec="seconds") if started else now_iso()),
+            "ended_at": now_iso(),
+            "duration_s": round(time.time() - started, 1) if started else 0,
+            "new_works": sorted(session.new_works),
+            "auto_tag": auto_tag,
+        }
+        append_crawl_history(lib.index_dir, entry)
+        log(f"\n[i] 已记录本次爬取：第 {ordinal} 次（{auto_tag}），"
+            f"给 {len(session.new_works)} 个新作品附加了该衍生标签")
+        return auto_tag
+    except Exception as exc:  # noqa: BLE001
+        log(f"[warn] 写爬取历史失败（不影响已下载内容）：{type(exc).__name__}: {exc}")
+        return None
 
 
 def search_records(
@@ -2934,6 +3108,8 @@ class CrawlSession:
         self.http = HttpClient(cfg, verbose=verbose)
         self.client = PixivClient(self.http, cfg, verbose=verbose)
         self.new_records: List[Dict[str, Any]] = []
+        self.new_works: Set[str] = set()      # 本次实际下载成功的作品 ID（用于附自动衍生标签）
+        self.dry_run: bool = False
         self.rec_lock = threading.Lock()
         self.known: Dict[str, int] = {}
         self.tag_counts: Dict[str, int] = {}
@@ -3164,6 +3340,7 @@ class CrawlSession:
         with self.rec_lock:
             self.downloaded += 1
             self.new_records.append(rec)
+        self.new_works.add(str(task["illust_id"]))
         extra = f"  → {rec['animated']}" if rec.get("animated") else ""
         out(f"    [ok] {rec['id']}_p{rec['page']} {format_size(size)}  "
             f"{rec['title'][:36]}{extra}")
@@ -4578,6 +4755,14 @@ def run_full(
     log("\n[i] 整理分类目录与索引…")
     info = session.finalize(rebuild=True)
     st = session.http.stats
+    session.dry_run = False
+    finalize_run_record(session, lib, mode="full", keywords=keywords,
+                        params={"order": order, "mode": mode, "s_mode": s_mode,
+                                "max_works": max_works,
+                                "seg_from": date_to_scd(start) if start else "",
+                                "seg_to": date_to_scd(end) if end else "",
+                                "target": target},
+                        result=info, started=started, log=log)
     log("\n========== 全量结果 ==========")
     log(f"新下载图片 {info.get('downloaded', 0)} 张，图库共 {info.get('total_records', 0)} 条记录")
     log(f"分段完成 {len(session.seg_state.done)} 段（记录在 {lib.index_dir / 'segments.json'}）")
@@ -4616,6 +4801,8 @@ def run_crawl(
     session = CrawlSession(cfg, lib, verbose=True)
     session.force = force
     session.deep_all = deep_all
+    session.dry_run = dry_run
+    started = time.time()
     # 分级：用户勾选的级别集合决定"服务器 mode"与"本地精筛"
     if r18_levels is not None:
         server_mode, allowed = r18_plan(r18_levels)
@@ -4673,6 +4860,11 @@ def run_crawl(
                 f"图库共 {info.get('total_records', 0)} 条记录")
             stats.update({"added": info.get("added", 0), "updated": info.get("updated", 0),
                           "total_records": info.get("total_records", 0)})
+            finalize_run_record(session, lib, mode="artist",
+                                artists=sorted(session.artist_ids),
+                                params={"order": order, "s_mode": s_mode,
+                                        "max_works": max_works},
+                                result=stats, started=started, log=log)
         return stats
     if scope == "both" and not session.artist_ids:
         log("[!] 检索范围选了「两者都要」，但没有填画师 ID；本次按纯关键词处理。")
@@ -4767,6 +4959,10 @@ def run_crawl(
         info = {"added": added, "updated": updated, "downloaded": session.downloaded,
                 "skipped": session.skipped, "failed": session.failed, "total_records": len(lib.load_records())}
     elapsed = time.time() - started
+    finalize_run_record(session, lib, mode="keyword", keywords=keywords,
+                        params={"pages": pages, "order": order, "mode": mode,
+                                "s_mode": s_mode, "deep": deep, "max_works": max_works},
+                        result=info, started=started, log=log)
     log("\n========== 本次结果 ==========")
     log(f"新下载图片：{info['downloaded']} 张，跳过（已存在）：{info['skipped']}，失败：{info['failed']}")
     sk_r18 = info.get("skipped_r18", 0)
@@ -5810,6 +6006,11 @@ def cmd_follow(args: argparse.Namespace, program_dir: Path) -> int:
     if not args.dry_run:
         out("\n[i] 整理分类目录与索引…")
         info = session.finalize(rebuild=True)
+        session.dry_run = False
+        finalize_run_record(session, lib, mode="follow",
+                            artists=[a.artist_id for a in targets],
+                            params={"pages": pages, "order": order},
+                            result=info, started=started, log=out)
         out(f"\n========== 追更结果 ==========")
         out(f"新增作品 {total_new} 个，新下载 {total_down} 张，失败 {total_fail}")
         out(f"图库共 {info.get('total_records', 0)} 条记录"
@@ -6490,30 +6691,50 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
 
     srow3 = ttk.Frame(tab_lib, padding=(0, 0, 0, 4))
     srow3.pack(fill="x")
-    ttk.Label(srow3, text="标签筛选（可多选，Ctrl/Shift 多选；默认要求全部命中）：").pack(side="left")
+    ttk.Label(srow3, text="原有TAG筛选（可多选；默认要求全部命中）：").pack(side="left")
     tag_all_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(srow3, text="要求全部命中", variable=tag_all_var).pack(side="left", padx=(6, 0))
     tag_filter_var = tk.StringVar()
     ttk.Label(srow3, text="　快速过滤标签：").pack(side="left")
     ttk.Entry(srow3, textvariable=tag_filter_var, width=14).pack(side="left")
 
+    dtag_row = ttk.Frame(tab_lib, padding=(0, 0, 0, 4))
+    dtag_row.pack(fill="x")
+    ttk.Label(dtag_row, text="衍生TAG筛选（你加的那一层，含自动「第N次爬取」）：").pack(side="left")
+    dtag_all_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(dtag_row, text="要求全部命中", variable=dtag_all_var).pack(side="left", padx=(6, 0))
+    dtag_filter_var = tk.StringVar()
+    ttk.Label(dtag_row, text="　快速过滤：").pack(side="left")
+    ttk.Entry(dtag_row, textvariable=dtag_filter_var, width=14).pack(side="left")
+    ttk.Button(dtag_row, text="编辑衍生标签…",
+               command=lambda: edit_dtags_dialog()).pack(side="left", padx=(10, 0))
+
     trow = ttk.Frame(tab_lib)
     trow.pack(fill="both", expand=True)
-    tag_box = tk.Listbox(trow, selectmode="extended", width=34, height=12,
+    tag_box = tk.Listbox(trow, selectmode="extended", width=32, height=12,
                          font=("Microsoft YaHei UI", 9), exportselection=False)
     tag_box.grid(row=0, column=0, sticky="nsw")
     tag_sb = ttk.Scrollbar(trow, command=tag_box.yview)
     tag_sb.grid(row=0, column=1, sticky="ns")
     tag_box.configure(yscrollcommand=tag_sb.set)
+    ttk.Label(trow, text="原TAG", foreground="#888").grid(row=1, column=0, sticky="w")
+
+    dtag_box = tk.Listbox(trow, selectmode="extended", width=26, height=12,
+                          font=("Microsoft YaHei UI", 9), exportselection=False)
+    dtag_box.grid(row=0, column=2, sticky="nsw", padx=(8, 0))
+    dtag_sb = ttk.Scrollbar(trow, command=dtag_box.yview)
+    dtag_sb.grid(row=0, column=3, sticky="ns")
+    dtag_box.configure(yscrollcommand=dtag_sb.set)
+    ttk.Label(trow, text="衍生TAG（可编辑）", foreground="#06c").grid(row=1, column=2, sticky="w")
 
     res_frame = ttk.Frame(trow)
-    res_frame.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
-    trow.columnconfigure(2, weight=1)
+    res_frame.grid(row=0, column=4, sticky="nsew", padx=(8, 0))
+    trow.columnconfigure(4, weight=1)
     trow.rowconfigure(0, weight=1)
 
-    cols = ("id", "title", "author", "tags", "likes", "bm", "date", "size", "file")
-    heads = ("作品ID", "标题", "画师", "标签", "点赞", "收藏", "发布时间", "大小", "文件")
-    widths = (90, 210, 130, 260, 60, 60, 96, 76, 300)
+    cols = ("id", "title", "author", "tags", "dtags", "likes", "bm", "date", "size", "file")
+    heads = ("作品ID", "标题", "画师", "原TAG", "衍生TAG", "点赞", "收藏", "发布时间", "大小", "文件")
+    widths = (90, 200, 130, 240, 180, 60, 60, 96, 76, 300)
     tree = ttk.Treeview(res_frame, columns=cols, show="headings")
     for c, w, h in zip(cols, widths, heads):
         tree.heading(c, text=h)
@@ -6535,6 +6756,9 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     def selected_tags() -> List[str]:
         return [tag_box.get(i) for i in tag_box.curselection()]
 
+    def selected_dtags() -> List[str]:
+        return [dtag_box.get(i) for i in dtag_box.curselection()]
+
     def load_tags() -> None:
         """把图库里的标签按出现次数填进左侧列表。"""
         hist = tag_histogram(L["recs"])
@@ -6549,7 +6773,106 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             name = tag_box.get(i).rsplit("　(", 1)[0]
             if name in keep:
                 tag_box.selection_set(i)
-        lib_status_var.set(f"标签 {len(hist)} 个，当前列出 {tag_box.size()} 个")
+        lib_status_var.set(f"原TAG {len(hist)} 个，当前列出 {tag_box.size()} 个")
+
+    def load_dtag_list() -> None:
+        """把衍生标签（含自动「第N次爬取」）按出现次数填进列表。"""
+        hist = dtag_histogram(L["recs"])
+        keep = [t for t in selected_dtags()]
+        dtag_box.delete(0, "end")
+        kw = dtag_filter_var.get().strip().lower()
+        for t, n in hist:
+            if kw and kw not in t.lower():
+                continue
+            dtag_box.insert("end", f"{t}　({n})")
+        for i in range(dtag_box.size()):
+            name = dtag_box.get(i).rsplit("　(", 1)[0]
+            if name in keep:
+                dtag_box.selection_set(i)
+
+    def edit_dtags_dialog() -> None:
+        """编辑选中作品的衍生标签：原TAG只读展示，衍生TAG可增删、可一键导入原TAG。"""
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在结果里选中一行（一行=一个作品的某一页）")
+            return
+        vals = tree.item(sel[0], "values")
+        work_id = str(vals[0])
+        rec = next((r for r in L["recs"] if str(r.get("id")) == work_id), None)
+        if rec is None:
+            messagebox.showinfo("提示", f"找不到作品 {work_id} 的记录")
+            return
+
+        dlg = tk.Toplevel(root)
+        dlg.title(f"编辑衍生标签 —— 作品 {work_id}")
+        dlg.transient(root)
+        dlg.grab_set()
+        ttk.Label(dlg, text=f"标题：{rec.get('title')}", font=("Microsoft YaHei UI", 10, "bold")
+                  ).pack(anchor="w", padx=12, pady=(12, 2))
+
+        # 原TAG：只读 + 提示不修改
+        ttk.Label(dlg, text="原有TAG（来自 pixiv，不建议修改）",
+                  foreground="#888").pack(anchor="w", padx=12, pady=(6, 2))
+        orig_box = tk.Listbox(dlg, width=64, height=4,
+                              font=("Microsoft YaHei UI", 9), exportselection=False,
+                              fg="#666", selectbackground="#e6e6e6")
+        orig_box.pack(padx=12, fill="x")
+        for t in (rec.get("tags") or []):
+            orig_box.insert("end", f"・ {t}")
+
+        # 衍生TAG：可编辑
+        ttk.Label(dlg, text="衍生TAG（你自己的标签，可增删）",
+                  foreground="#06c").pack(anchor="w", padx=12, pady=(8, 2))
+        dlg_tag_list = tk.Listbox(dlg, width=64, height=6,
+                                  font=("Microsoft YaHei UI", 9), exportselection=False)
+        dlg_tag_list.pack(padx=12, fill="x")
+
+        def refresh_list() -> None:
+            dlg_tag_list.delete(0, "end")
+            for t in work_dtags(L["lib"].index_dir, work_id):
+                dlg_tag_list.insert("end", t)
+
+        refresh_list()
+
+        new_tag_var = tk.StringVar()
+        entry_row = ttk.Frame(dlg)
+        entry_row.pack(fill="x", padx=12, pady=8)
+        ent = ttk.Entry(entry_row, textvariable=new_tag_var, width=30)
+        ent.pack(side="left")
+
+        def add_tag() -> None:
+            s = new_tag_var.get().strip()
+            if not s:
+                return
+            add_work_dtags(L["lib"].index_dir, work_id, [s])
+            new_tag_var.set("")
+            refresh_list()
+
+        ent.bind("<Return>", lambda _e: add_tag())
+        ttk.Button(entry_row, text="添加", command=add_tag).pack(side="left", padx=4)
+        ttk.Button(entry_row, text="删除选中",
+                   command=lambda: (
+                       set_work_dtags(L["lib"].index_dir, work_id,
+                                      [dlg_tag_list.get(i) for i in range(dlg_tag_list.size())
+                                       if i not in dlg_tag_list.curselection()]),
+                       refresh_list())).pack(side="left", padx=4)
+        ttk.Button(entry_row, text="一键导入原TAG",
+                   command=lambda: (
+                       add_work_dtags(L["lib"].index_dir, work_id,
+                                      [str(t) for t in (rec.get("tags") or [])]),
+                       refresh_list())).pack(side="left", padx=4)
+
+        def apply_close() -> None:
+            dlg.destroy()
+            refresh_list()          # 刷新整个图库页面的衍生标签列表
+            load_dtags_now()
+            run_search()
+
+        def load_dtags_now() -> None:
+            L["recs"] = L["lib"].load_records()
+            load_dtag_list()
+
+        ttk.Button(dlg, text="完成", command=apply_close).pack(anchor="e", padx=12, pady=8)
 
     def run_search(*_a: Any) -> None:
         recs = L["recs"]
@@ -6559,6 +6882,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             # 列表项形如 "标签　(12)"，取前面的真实标签名
             tags=[t.rsplit("　(", 1)[0] for t in selected_tags()],
             tags_match_all=bool(tag_all_var.get()),
+            d_tags=[t.rsplit("　(", 1)[0] for t in selected_dtags()],
+            d_tags_match_all=bool(dtag_all_var.get()),
             author=q_author_var.get(),
             author_ids=[w for w in re.split(r"[\s,，]+", q_aid_var.get().strip()) if w],
             date_from=q_date_range["from_value"](),
@@ -6572,9 +6897,10 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         )
         tree.delete(*tree.get_children())
         for r in hits:
+            dt = "、".join(str(t) for t in (r.get("d_tags") or [])[:3]) or "—"
             tree.insert("", "end", values=(
                 r.get("id"), r.get("title"), r.get("author"),
-                "、".join(str(t) for t in (r.get("tags") or [])[:6]),
+                "、".join(str(t) for t in (r.get("tags") or [])[:6]), dt,
                 as_int(r.get("like_count"), 0), as_int(r.get("bookmark_count"), 0),
                 str(r.get("create_date") or "")[:10],
                 format_size(as_int(r.get("bytes"), 0)), r.get("file")))
@@ -6591,6 +6917,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         q_ai_var.set("all")
         q_sort_var.set("default")
         tag_box.selection_clear(0, "end")
+        dtag_box.selection_clear(0, "end")
         run_search()
 
     def _entry_path() -> Optional[Path]:
@@ -6598,7 +6925,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         if not sel:
             messagebox.showinfo("提示", "请先在结果里选中一行")
             return None
-        rel = tree.item(sel[0], "values")[8]
+        rel = tree.item(sel[0], "values")[9]   # 列顺序：id,title,author,tags,dtags,likes,bm,date,size,file
         return L["lib"].root / str(rel).replace("/", os.sep)
 
     def open_selected(*_a: Any) -> None:
@@ -6640,7 +6967,9 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     for w in (qe,):
         w.bind("<Return>", run_search)
     tag_filter_var.trace_add("write", lambda *_a: load_tags())
+    dtag_filter_var.trace_add("write", lambda *_a: load_dtag_list())
     tag_box.bind("<Double-1>", run_search)
+    dtag_box.bind("<Double-1>", run_search)
 
     # ==================================================================================
     # 标签页 3：图库位置
@@ -6686,6 +7015,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             f"索引文件：{L['lib'].md_path if os.path.isfile(native_path(L['lib'].md_path)) else '（尚未生成）'}")
         lib_count_var.set(f"记录：{len(recs)}")
         load_tags()
+        load_dtag_list()
         run_search()
 
     def browse_library() -> None:
@@ -6730,6 +7060,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         loc_var.set(str(new))
         refresh_lib_info()
         load_tags()
+        load_dtag_list()
         run_search()
         messagebox.showinfo("已切换图库位置",
                             f"新位置：{new}\n配置已保存到：{cfg_path}\n\n"
@@ -7035,6 +7366,65 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         start_probe() if nb.index("current") == 3 and not L.get("probing") else None))
 
     # ==================================================================================
+    # 标签页 5：爬取历史
+    # ==================================================================================
+    tab_hist = ttk.Frame(nb, padding=6)
+    nb.add(tab_hist, text="　爬取历史　")
+
+    ttk.Label(tab_hist, text="每次爬取的记录：序号（自动标签用）、时间、模式、检索项、结果",
+              foreground="#666").pack(anchor="w", pady=(0, 4))
+
+    hcols = ("ord", "started", "mode", "target", "downloaded", "failed", "duration", "auto_tag")
+    hheads = ("第N次", "开始时间", "模式", "检索项", "下载", "失败", "耗时", "自动标签")
+    hwidths = (60, 150, 80, 300, 60, 60, 60, 220)
+    htree = ttk.Treeview(tab_hist, columns=hcols, show="headings", height=14)
+    for c, w, h in zip(hcols, hwidths, hheads):
+        htree.heading(c, text=h)
+        htree.column(c, width=w, anchor="w")
+    htree.pack(fill="both", expand=True)
+    hvsb = ttk.Scrollbar(tab_hist, orient="vertical", command=htree.yview)
+    hvsb.pack(side="right", fill="y")
+    htree.configure(yscrollcommand=hvsb.set)
+
+    hist_status_var = tk.StringVar(value="")
+    hrow = ttk.Frame(tab_hist, padding=(0, 6, 0, 0))
+    hrow.pack(fill="x")
+    ttk.Label(hrow, textvariable=hist_status_var, foreground="#666").pack(side="left")
+    ttk.Button(hrow, text="刷新", command=lambda: refresh_history_tab()).pack(side="right", padx=2)
+    ttk.Button(hrow, text="清除历史…", command=lambda: clear_history()).pack(side="right", padx=2)
+
+    def refresh_history_tab() -> None:
+        entries = load_crawl_history(L["lib"].index_dir)
+        htree.delete(*htree.get_children())
+        for e in entries:
+            mode = str(e.get("mode") or "")
+            targets = "、".join(str(x) for x in (e.get("keywords") or e.get("artists") or []))
+            htree.insert("", "end", values=(
+                e.get("ordinal"), str(e.get("started_at") or "")[:19].replace("T", " "),
+                mode, targets[:80],
+                (e.get("result") or {}).get("downloaded", ""),
+                (e.get("result") or {}).get("failed", ""),
+                f"{float(e.get('duration_s') or 0):.0f}s", e.get("auto_tag") or ""))
+        hist_status_var.set(f"共 {len(entries)} 次爬取")
+        # 更新状态栏与衍生标签列表（每次爬取都会新增「第N次爬取」衍生标签）
+        load_dtag_list()
+
+    def clear_history() -> None:
+        if not messagebox.askyesno("确认", "清空爬取历史？\n（不影响图库与衍生标签，"
+                                           "但「第N次爬取」的序号会重置为 1）"):
+            return
+        p = history_path(L["lib"].index_dir)
+        if os.path.exists(native_path(p)):
+            try:
+                os.remove(native_path(p))
+            except OSError as exc:
+                messagebox.showerror("清除失败", str(exc))
+                return
+        refresh_history_tab()
+
+    reload_history_tab = refresh_history_tab   # 供爬取完成回调复用
+
+    # ==================================================================================
     # 爬取执行（后台线程 + 队列 + 主线程渲染）
     # ==================================================================================
     def refresh_list(*_: Any) -> None:
@@ -7172,7 +7562,9 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                     status_var.set("就绪")
                     refresh_list()
                     load_tags()
+                    load_dtag_list()
                     run_search()
+                    refresh_history_tab()
                     continue
                 if isinstance(msg, tuple):
                     kind, payload = msg

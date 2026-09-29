@@ -127,7 +127,7 @@ flush()
 after = len(tree.get_children())
 print(f"  限定 2026 年：{after} 行")
 check("结果减少（或等于且年份都正确）", after <= baseline, f"{baseline} -> {after}")
-years = {str(tree.item(i, "values")[6])[:4] for i in tree.get_children()}
+years = {str(tree.item(i, "values")[7])[:4] for i in tree.get_children()}
 print(f"  结果年份集合: {sorted(years)}")
 check("结果年份都在 2026", years in ({"2026"}, set()), sorted(years))
 
@@ -135,7 +135,7 @@ print("\n=== 4) 限定到很老的年份应显著减少 ===")
 tcl.setvar(yf, "2007"); tcl.setvar(yt, "2007")
 flush()
 old = len(tree.get_children())
-years_old = {str(tree.item(i, "values")[6])[:4] for i in tree.get_children()}
+years_old = {str(tree.item(i, "values")[7])[:4] for i in tree.get_children()}
 print(f"  限定 2007 年：{old} 行，年份集合={sorted(years_old)}")
 check("明显减少", old < after, f"{after} -> {old}")
 check("年份都在 2007", years_old in ({"2007"}, set()), sorted(years_old))

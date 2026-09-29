@@ -67,7 +67,7 @@ nb = nbs[0]
 print("=== 1) 标签页结构 ===")
 titles = [nb.tab(t, "text").strip() for t in nb.tabs()]
 print(f"  {titles}")
-check("四个平级标签页", titles == ["爬取", "图库检索", "图库位置", "读取能力"], titles)
+check("四个平级标签页", titles == ["爬取", "图库检索", "图库位置", "读取能力", "爬取历史"], titles)
 
 print("\n=== 2) 切到「读取能力」触发自动体检 ===")
 nb.select(nb.tabs()[3])
