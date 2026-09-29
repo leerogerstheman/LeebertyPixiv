@@ -7131,26 +7131,37 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         info = (f"ID {str(vals[0]).split('×', 1)[0]}　{vals[1]}\n画师 {vals[2]}\n"
                 f"发布于 {vals[7]}　大小 {vals[8]}\n文件 {rel}")
         preview_info_var.set(info)
-        # 缩略图：tkinter 的 PhotoImage 原生支持 PNG/GIF，不需要第三方库。
-        # JPG/WebP 等 tk 不支持内嵌显示，提示双击用系统看图器打开（零依赖原则）。
+        # 缩略图：
+        #  · 装了 Pillow（推荐环境，已在用的那套 Python）→ 全格式（JPG/WebP/GIF/PNG…）都能预览
+        #  · 没装 Pillow（其他纯 Python 环境）→ 退回 tkinter 原生，只支持 PNG/GIF
+        # 两种情况都优雅降级，不会崩。
         try:
             fmt = str(p.suffix).lower()
             if not p.exists():
                 preview_img.configure(image="", text="（文件不存在）")
                 return
-            if fmt in (".png", ".gif"):
-                from tkinter import PhotoImage as _PhotoImage
-                im = _PhotoImage(file=native_path(p))
-                # 按整数倍数缩小，避免塞满面板
-                w, h = im.width(), im.height()
-                while w > 360 or h > 220:
-                    im = im.subsample(2, 2)
-                    w, h = im.width(), im.height()
-                L["_preview_ref"] = im            # 防止被 GC
-                preview_img.configure(image=im, text="")
+            tk_img = None
+            try:
+                from PIL import Image, ImageTk  # type: ignore
+                with Image.open(native_path(p)) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((360, 220), Image.Resampling.LANCZOS)
+                    tk_img = ImageTk.PhotoImage(im)
+            except ImportError:
+                # 无 Pillow：走 tkinter 原生，仅 PNG/GIF
+                if fmt in (".png", ".gif"):
+                    from tkinter import PhotoImage as _PhotoImage
+                    tk_img = _PhotoImage(file=native_path(p))
+                    w, h = tk_img.width(), tk_img.height()
+                    while w > 360 or h > 220:
+                        tk_img = tk_img.subsample(2, 2)
+                        w, h = tk_img.width(), tk_img.height()
+            if tk_img is not None:
+                L["_preview_ref"] = tk_img        # 防止被 GC
+                preview_img.configure(image=tk_img, text="")
             else:
                 L.pop("_preview_ref", None)
-                preview_img.configure(image="", text=f"（{fmt[1:].upper()} 格式：tkinter 不支持内嵌预览，双击打开）")
+                preview_img.configure(image="", text=f"（{fmt[1:].upper()}：本机预览库不可用，双击打开）")
         except Exception as exc:  # noqa: BLE001
             L.pop("_preview_ref", None)
             preview_img.configure(image="", text=f"（预览失败：{type(exc).__name__}）")
