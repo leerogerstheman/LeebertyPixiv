@@ -80,7 +80,7 @@ def date_groups(tab_index):
 
 
 print("=== 1) 两页各有一组日期下拉（且都已布局）===")
-for idx, name in ((0, "爬取"), (1, "图库检索")):
+for idx, name in ((0, "爬取"), (2, "图库检索")):
     nb.select(tabs[idx]); flush()
     groups = date_groups(idx)
     print(f"  [{name}] 日期组 {len(groups)} 个，每组 {[len(g) for g in groups]} 个下拉")
@@ -92,8 +92,8 @@ for idx, name in ((0, "爬取"), (1, "图库检索")):
         check(f"{name}页都已布局", all(w > 20 for w in widths), widths)
 
 print("\n=== 2) 检索页联动（用真实控件）===")
-nb.select(tabs[1]); flush()
-grp = date_groups(1)[0]
+nb.select(tabs[2]); flush()
+grp = date_groups(2)[0]
 yf_cb, mf_cb, df_cb, yt_cb, mt_cb, dt_cb = grp
 (yf, mf, df), (yt, mt, dt) = (yf_cb.cget("textvariable"), mf_cb.cget("textvariable"),
                               df_cb.cget("textvariable")), (yt_cb.cget("textvariable"),
@@ -112,8 +112,9 @@ tcl.setvar(yf, "2023"); flush()
 check("2023-02 = 28 天", len(df_cb.cget("values")) - 1 == 28, len(df_cb.cget("values")) - 1)
 
 print("\n=== 3) 与检索联动：限定年份后结果应减少 ===")
+tab_lib2 = nb.nametowidget(nb.tabs()[2])
 trees = []
-find(root, tk.ttk.Treeview, trees)
+find(tab_lib2, tk.ttk.Treeview, trees)
 tree = trees[0]
 for v in (yf, mf, df, yt, mt, dt):
     tcl.setvar(v, "不限")
@@ -159,7 +160,7 @@ flush()
 check("爬取页已设为 2007-9",
       tcl.getvar(grp0[0].cget("textvariable")) == "2007"
       and tcl.getvar(grp0[1].cget("textvariable")) == "9")
-nb.select(tabs[1]); flush()
+nb.select(tabs[2]); flush()
 check("检索页仍是「不限」",
       all(tcl.getvar(v) == "不限" for v in (yf, mf, df, yt, mt, dt)))
 

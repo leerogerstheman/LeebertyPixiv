@@ -73,16 +73,17 @@ check("爬取页有至少 2 个输入框（关键词 + 画师ID）", len(entries
 
 print("\n=== 2) 图库检索页有「画师ID」输入框 ===")
 tab1 = nb.nametowidget(nb.tabs()[1])
-nb.select(nb.tabs()[1]); flush()
+nb.select(nb.tabs()[2]); flush()
+tab_lib2 = nb.nametowidget(nb.tabs()[2])
 labels2 = []
-find(tab1, tk.ttk.Label, labels2)
+find(tab_lib2, tk.ttk.Label, labels2)
 lt2 = [str(l.cget("text")) for l in labels2]
 print(f"  标签中含画师ID：{[t for t in lt2 if '画师' in t]}")
 check("检索页有「画师ID：」标签", any("画师ID" in t for t in lt2), [t for t in lt2 if "画师" in t])
 
 print("\n=== 3) 检索页填画师 ID 能真的筛出来 ===")
 entries2 = []
-find(tab1, tk.ttk.Entry, entries2)
+find(tab_lib2, tk.ttk.Entry, entries2)
 # 画师ID 输入框是宽度 18 的那个
 aid_entry2 = None
 for e in entries2:
@@ -95,7 +96,7 @@ for e in entries2:
 check("找到画师ID输入框（宽度18）", aid_entry2 is not None,
       [str(e.cget("width")) for e in entries2])
 trees = []
-find(root, tk.ttk.Treeview, trees)
+find(tab_lib2, tk.ttk.Treeview, trees)
 tree = trees[0]
 # 切到检索页后等初始检索完成（run_search 是经 event loop 异步触发的，直接量会是 0）
 for _ in range(40):

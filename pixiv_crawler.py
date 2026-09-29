@@ -5946,6 +5946,65 @@ def cmd_repair(args: argparse.Namespace, program_dir: Path) -> int:
     return 0
 
 
+def run_follow_sync(cfg: Dict[str, Any], lib: Library, store, targets: Sequence[Any], *,
+                    dry_run: bool = False, order: str = "date",
+                    log=out, started: float = 0.0) -> Dict[str, int]:
+    """追更同步主流程（CLI 与图形界面共用）。
+
+    对清单里每位画师跑 crawl_artist（增量：已下载的自动跳过），记录上次追更时间，
+    结束时统一 finalize + 写爬取历史。返回 {new, downloaded, failed, records}。
+    """
+    session = CrawlSession(cfg, lib, verbose=True)
+    session.known = lib.known_ids_fast()
+    session.dry_run = dry_run
+    pages = int(cfg.get("pages") or 1)
+    max_works = int(cfg.get("max_works_per_run") or 0)
+    started = started or time.time()
+    log("=" * 68)
+    log(f"追更 {len(targets)} 位画师" + ("（干跑，不下载）" if dry_run else "")
+        + f"　图库现有 {len(session.known)} 个作品")
+    log("=" * 68)
+
+    total_new = total_down = total_fail = 0
+    for a in targets:
+        try:
+            stats = session.crawl_artist(a.artist_id, name=a.name, max_works=max_works,
+                                         pages=pages, dry_run=dry_run, order=order)
+        except KeyboardInterrupt:
+            log("\n[!] 被中断，已下载的内容与索引均已保存。")
+            break
+        except CrawlError as exc:
+            log(f"[warn] 画师 {a.label()} 追更失败：{exc}")
+            continue
+        total_new += int(stats.get("new") or 0)
+        total_down += int(stats.get("downloaded") or 0)
+        total_fail += int(stats.get("failed") or 0)
+        if not dry_run:
+            store.mark_synced(a.artist_id)
+            store.save()
+            lib.log_query(f"artist:{a.artist_id}", int(stats.get("downloaded") or 0), 0,
+                          int(stats.get("failed") or 0), 0)
+
+    if not dry_run:
+        log("\n[i] 整理分类目录与索引…")
+        info = session.finalize(rebuild=True)
+        session.dry_run = False
+        finalize_run_record(session, lib, mode="follow",
+                            artists=[a.artist_id for a in targets],
+                            params={"pages": pages, "order": order},
+                            result=info, started=started, log=log)
+        log(f"\n========== 追更结果 ==========")
+        log(f"新增作品 {total_new} 个，新下载 {total_down} 张，失败 {total_fail}")
+        log(f"图库共 {info.get('total_records', 0)} 条记录"
+            f"（标签链接 {info.get('tag_links', 0)}，画师链接 {info.get('author_links', 0)}）")
+    else:
+        log(f"\n[dry-run] 共发现新增作品 {total_new} 个，未下载任何文件。")
+        log("去掉 --dry-run 即可真正下载。")
+    log(f"耗时 {time.time() - started:.1f}s")
+    return {"new": total_new, "downloaded": total_down, "failed": total_fail,
+            "records": len(lib.load_records())}
+
+
 def cmd_follow(args: argparse.Namespace, program_dir: Path) -> int:
     """画师追更：订阅清单管理 + 增量下载新作品。
 
@@ -6044,54 +6103,8 @@ def cmd_follow(args: argparse.Namespace, program_dir: Path) -> int:
             return 1
 
     session = CrawlSession(cfg, lib, verbose=True)
-    session.known = lib.known_ids_fast()
-    pages = int(getattr(args, "pages", 0) or cfg.get("pages") or 1)
-    max_works = int(getattr(args, "limit", 0) or 0)
-    order = str(getattr(args, "order", None) or "date")
-    out("=" * 68)
-    out(f"追更 {len(targets)} 位画师"
-        + ("（干跑，不下载）" if args.dry_run else "")
-        + f"　图库现有 {len(session.known)} 个作品")
-    out("=" * 68)
-
-    started = time.time()
-    total_new = total_down = total_fail = 0
-    for a in targets:
-        try:
-            stats = session.crawl_artist(a.artist_id, name=a.name, max_works=max_works,
-                                         pages=pages, dry_run=bool(args.dry_run), order=order)
-        except KeyboardInterrupt:
-            out("\n[!] 被中断，已下载的内容与索引均已保存。")
-            break
-        except CrawlError as exc:
-            out(f"[warn] 画师 {a.label()} 追更失败：{exc}")
-            continue
-        total_new += int(stats.get("new") or 0)
-        total_down += int(stats.get("downloaded") or 0)
-        total_fail += int(stats.get("failed") or 0)
-        if not args.dry_run:
-            store.mark_synced(a.artist_id)
-            store.save()
-            lib.log_query(f"artist:{a.artist_id}", int(stats.get("downloaded") or 0), 0,
-                          int(stats.get("failed") or 0), 0)
-
-    if not args.dry_run:
-        out("\n[i] 整理分类目录与索引…")
-        info = session.finalize(rebuild=True)
-        session.dry_run = False
-        finalize_run_record(session, lib, mode="follow",
-                            artists=[a.artist_id for a in targets],
-                            params={"pages": pages, "order": order},
-                            result=info, started=started, log=out)
-        out(f"\n========== 追更结果 ==========")
-        out(f"新增作品 {total_new} 个，新下载 {total_down} 张，失败 {total_fail}")
-        out(f"图库共 {info.get('total_records', 0)} 条记录"
-            f"（标签链接 {info.get('tag_links', 0)}，画师链接 {info.get('author_links', 0)}）")
-    else:
-        out(f"\n[dry-run] 共发现新增作品 {total_new} 个，未下载任何文件。")
-        out("去掉 --dry-run 即可真正下载。")
-    out(f"耗时 {time.time() - started:.1f}s")
-    return 0
+    return run_follow_sync(cfg, lib, store, targets, dry_run=bool(args.dry_run),
+                           order=str(getattr(args, "order", None) or "date"), log=out)["new"]
 
 
 def cmd_stats(args: argparse.Namespace, program_dir: Path) -> int:
@@ -6706,7 +6719,165 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     update_level_hint()   # 初始化分级回显
 
     # ==================================================================================
-    # 标签页 2：图库检索
+    # 标签页 2：追更（订阅画师清单 + 一键同步）
+    # ==================================================================================
+    tab_follow = ttk.Frame(nb, padding=6)
+    nb.add(tab_follow, text="　追更　")
+
+    try:
+        _follow_store = artists_mod.ArtistStore(L["lib"].root / artists_mod.ARTISTS_FILENAME)
+    except Exception:  # noqa: BLE001
+        _follow_store = None
+
+    frow = ttk.Frame(tab_follow)
+    frow.pack(fill="x")
+    ttk.Label(frow, text="订阅的画师（增量追更：只下载上次以后的新作品）",
+              foreground="#666").pack(side="left")
+    ttk.Button(frow, text="添加画师…", command=lambda: add_follow_dialog()).pack(
+        side="left", padx=(10, 0))
+    ttk.Button(frow, text="移除选中", command=lambda: remove_follows()).pack(side="left", padx=4)
+    dry_run_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(frow, text="干跑（只报新增不下载）", variable=dry_run_var).pack(
+        side="left", padx=(8, 0))
+    follow_status_var = tk.StringVar(value="就绪")
+    ttk.Label(frow, textvariable=follow_status_var, foreground="#777").pack(
+        side="left", padx=(10, 0))
+
+    fcols = ("name", "id", "last", "note")
+    fheads = ("画师", "ID", "上次追更", "备注")
+    fwidths = (200, 110, 170, 200)
+    ftree = ttk.Treeview(tab_follow, columns=fcols, show="headings", height=12)
+    for c, w, h in zip(fcols, fwidths, fheads):
+        ftree.heading(c, text=h)
+        ftree.column(c, width=w, anchor="w")
+    ftree.pack(fill="both", expand=True, pady=(6, 0))
+    fvsb = ttk.Scrollbar(tab_follow, orient="vertical", command=ftree.yview)
+    fvsb.pack(side="right", fill="y")
+    ftree.configure(yscrollcommand=fvsb.set)
+
+    fbtns = ttk.Frame(tab_follow, padding=(0, 8, 0, 0))
+    fbtns.pack(fill="x")
+    ttk.Button(fbtns, text="同步全部（增量下载）", command=lambda: start_follow_sync()).pack(side="left")
+    ttk.Button(fbtns, text="打开追更清单文件",
+               command=lambda: open_path(
+                   L["lib"].root / artists_mod.ARTISTS_FILENAME)).pack(side="left", padx=6)
+    ttk.Label(fbtns, textvariable=follow_status_var, foreground="#666").pack(side="right")
+
+    f_log = tk.Text(tab_follow, height=8, wrap="none", font=("Consolas", 9))
+    f_log.pack(fill="x", pady=(8, 0))
+
+    def flogln(msg: str) -> None:
+        f_log.insert("end", str(msg) + "\n")
+        f_log.see("end")
+
+    def refresh_follows() -> None:
+        if artists_mod is None:
+            follow_status_var.set("缺少 artists.py，追更不可用")
+            return
+        global _follow_store
+        _follow_store = artists_mod.ArtistStore(L["lib"].root / artists_mod.ARTISTS_FILENAME)
+        ftree.delete(*ftree.get_children())
+        for a in _follow_store.artists:
+            ftree.insert("", "end", values=(
+                a.name or f"id={a.artist_id}", a.artist_id,
+                (a.last_sync[:19].replace("T", " ") if a.last_sync else "尚未追更"),
+                a.note))
+        follow_status_var.set(f"共 {len(_follow_store.artists)} 位画师")
+
+    def add_follow_dialog() -> None:
+        dlg = tk.Toplevel(root)
+        dlg.title("订阅画师")
+        dlg.transient(root)
+        dlg.grab_set()
+        ttk.Label(dlg, text="画师 ID 或主页链接（可用逗号分隔多个）：",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+        var = tk.StringVar()
+        ent = ttk.Entry(dlg, textvariable=var, width=56)
+        ent.pack(padx=12, fill="x")
+        name_var = tk.StringVar()
+        ttk.Label(dlg, text="画师名（可留空，同步时自动补）：").pack(anchor="w", padx=12, pady=(8, 2))
+        ttk.Entry(dlg, textvariable=name_var, width=56).pack(padx=12, fill="x")
+        info = tk.StringVar(value="")
+        ttk.Label(dlg, textvariable=info, foreground="#c00").pack(anchor="w", padx=12, pady=(6, 0))
+
+        def ok() -> None:
+            if artists_mod is None:
+                info.set("缺少 artists.py")
+                return
+            text = var.get().strip()
+            ids = [artists_mod.parse_artist_ref(x) for x in re.split(r"[\s,，]+", text) if x.strip()]
+            ids = [i for i in ids if i]
+            if not ids:
+                info.set("看不懂输入：支持纯数字ID或 https://www.pixiv.net/users/12345")
+                return
+            added = 0
+            name = (name_var.get() or "").strip()
+            for aid in ids:
+                a, is_new = _follow_store.add(aid, name=name)
+                added += 1 if is_new else 0
+            _follow_store.save()
+            dlg.destroy()
+            refresh_follows()
+            flogln(f"已添加 {added} 位，共 {len(_follow_store.artists)} 位画师")
+            if added:
+                start_follow_sync(dry_run=True)   # 加完顺手看增量，不真正下载
+
+        row = ttk.Frame(dlg)
+        row.pack(fill="x", padx=12, pady=10)
+        ttk.Button(row, text="添加并预览增量", command=ok).pack(side="left")
+        ttk.Button(row, text="取消", command=dlg.destroy).pack(side="left", padx=6)
+        ent.bind("<Return>", lambda _e: ok())
+        ent.focus_set()
+
+    def remove_follows() -> None:
+        sel = ftree.selection()
+        if not sel:
+            flogln("请先在清单里选中要移除的画师")
+            return
+        removed = 0
+        for item in sel:
+            aid = ftree.item(item, "values")[1]
+            if _follow_store.remove(aid):
+                removed += 1
+        if removed:
+            _follow_store.save()
+            flogln(f"已移除 {removed} 位画师")
+        refresh_follows()
+
+    def start_follow_sync(dry_run: bool = False) -> None:
+        if L.get("busy"):
+            flogln("正在执行其它任务，请稍候")
+            return
+        if artists_mod is None or _follow_store is None:
+            flogln("缺少 artists.py")
+            return
+        if not _follow_store.artists:
+            flogln("追更清单是空的，先添加画师")
+            return
+        L["busy"] = True
+        follow_status_var.set("正在同步…")
+        flogln("")
+        flogln("=" * 30 + " 开始同步 " + "=" * 30)
+        targets = list(_follow_store.artists)
+        dry = bool(dry_run_var.get()) or dry_run
+        snap = dict(L["cfg"])
+        started = time.time()
+
+        def worker() -> None:
+            try:
+                run_follow_sync(snap, L["lib"], _follow_store, targets,
+                                dry_run=dry, order=str(snap.get("order") or "date"),
+                                log=lambda m: msg_q.put(("[follow]", m)), started=started)
+                msg_q.put(("__FOLLOW_DONE__", None))
+            except Exception as exc:  # noqa: BLE001
+                msg_q.put(("[follow]", f"[error] {type(exc).__name__}: {exc}"))
+                msg_q.put(("__FOLLOW_DONE__", None))
+        threading.Thread(target=worker, daemon=True).start()
+
+    refresh_follows()
+
+    # ==================================================================================
+    # 标签页 3：图库检索
     # ==================================================================================
     tab_lib = ttk.Frame(nb, padding=6)
     nb.add(tab_lib, text="　图库检索　")
@@ -7510,8 +7681,9 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         start_probe()
 
     # 打开这一页时自动跑一次体检（延后到事件循环，避免拖慢界面出现）
+    # 打开「读取能力」页（tab 4）时自动跑一次体检（延后到事件循环，避免拖慢界面出现）
     nb.bind("<<NotebookTabChanged>>", lambda _e: (
-        start_probe() if nb.index("current") == 3 and not L.get("probing") else None))
+        start_probe() if nb.index("current") == 4 and not L.get("probing") else None))
 
     # ==================================================================================
     # 标签页 5：爬取历史
@@ -7715,6 +7887,20 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                     refresh_history_tab()
                     continue
                 if isinstance(msg, tuple):
+                    # 追更页消息：(tag='[follow]', text) / ('__FOLLOW_DONE__', None)
+                    if msg[0] == "[follow]":
+                        flogln(msg[1])
+                        continue
+                    if msg[0] == "__FOLLOW_DONE__":
+                        L["busy"] = False
+                        follow_status_var.set("同步完成")
+                        refresh_follows()
+                        refresh_list()
+                        load_tags()
+                        load_dtag_list()
+                        run_search()
+                        refresh_history_tab()
+                        continue
                     kind, payload = msg
                     if kind == "__PROBE_TICK__":
                         cap_banner.set(f"正在检测… {payload}")

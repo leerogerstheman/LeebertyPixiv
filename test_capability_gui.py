@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """读取能力页的端到端测试：切到该页 -> 自动体检 -> 验证渲染出的结论与按钮可用。"""
 import argparse
 import importlib.util
@@ -67,10 +67,10 @@ nb = nbs[0]
 print("=== 1) 标签页结构 ===")
 titles = [nb.tab(t, "text").strip() for t in nb.tabs()]
 print(f"  {titles}")
-check("四个平级标签页", titles == ["爬取", "图库检索", "图库位置", "读取能力", "爬取历史"], titles)
+check("四个平级标签页", titles == ["爬取", "追更", "图库检索", "图库位置", "读取能力", "爬取历史"], titles)
 
 print("\n=== 2) 切到「读取能力」触发自动体检 ===")
-nb.select(nb.tabs()[3])
+nb.select(nb.tabs()[4])
 nb.event_generate("<<NotebookTabChanged>>")
 pump(1.0)
 banner = [t for t in texts() if any(k in t for k in ("正在检测", "完全可用", "仅匿名", "部分受限", "检测失败"))]
@@ -114,8 +114,10 @@ check("给出了建议", bool(adv), adv)
 
 print("\n=== 7) 按钮可用 ===")
 btns = []
-find(root, tk.ttk.Button, btns)
-for name in ("开始检测", "从浏览器自动导入 Cookie", "手动填 PHPSESSID…", "打开凭据库目录", "清除已保存凭据"):
+# 从「读取能力」页（tab 4）内找，其它标签页的按钮不相关
+find(nb.nametowidget(nb.tabs()[4]), tk.ttk.Button, btns)
+for name in ("开始检测", "从浏览器自动导入 Cookie", "手动填 PHPSESSID…", "用 pixiv 官网登录（OAuth）",
+             "打开凭据库目录", "清除已保存凭据"):
     b = next((x for x in btns if x.cget("text") == name), None)
     check(f"按钮「{name}」存在且可点", b is not None and "disabled" not in b.state(),
           b.state() if b else "缺失")
