@@ -7894,17 +7894,42 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         load_dtag_list()
 
     def clear_history() -> None:
-        if not messagebox.askyesno("确认", "清空爬取历史？\n（不影响图库与衍生标签，"
-                                           "但「第N次爬取」的序号会重置为 1）"):
-            return
-        p = history_path(L["lib"].index_dir)
-        if os.path.exists(native_path(p)):
-            try:
-                os.remove(native_path(p))
-            except OSError as exc:
-                messagebox.showerror("清除失败", str(exc))
-                return
-        refresh_history_tab()
+        """清空爬取历史。破坏性操作：先弹详细警告，默认不建议。"""
+        # 自定义警告对话框：把后果和"不建议"讲清楚，避免手滑
+        dlg = tk.Toplevel(root)
+        dlg.title("清除爬取历史？")
+        dlg.transient(root)
+        dlg.grab_set()
+        ttk.Label(dlg, text="⚠ 不建议清除爬取历史", font=("Microsoft YaHei UI", 11, "bold"),
+                  foreground="#c00").pack(anchor="w", padx=14, pady=(14, 6))
+        ttk.Label(dlg, text="清除会带来这些后果：", font=("Microsoft YaHei UI", 9, "bold")
+                  ).pack(anchor="w", padx=14, pady=(0, 2))
+        ttk.Label(dlg, text=(
+            "· 所有爬取记录将被删除，且无法恢复（没有备份）\n"
+            "· 「第N次爬取」序号会重置 —— 下次爬取从「第1次爬取」重新开始\n"
+            "· 之后新下载的作品将附上重新计数的自动标签，\n"
+            "  与旧标签（如「2026年9月29日第12次爬取」）脱节，溯源会错乱\n"
+            "· 图库里的作品和衍生标签不受影响"),
+                  justify="left", foreground="#333").pack(anchor="w", padx=14)
+        ttk.Label(dlg, text=(
+            "正常使用一般不需要清除：可以在「爬取历史」页查看每次的记录，\n"
+            "历史文件很小，留着也不占空间。请确认你真的要清。"),
+                  justify="left", foreground="#a00").pack(anchor="w", padx=14, pady=(6, 0))
+        row = ttk.Frame(dlg)
+        row.pack(fill="x", padx=14, pady=12)
+        ttk.Button(row, text="仍然清除", command=lambda: do_clear(dlg)).pack(side="right")
+        ttk.Button(row, text="取消", command=dlg.destroy).pack(side="right", padx=(0, 6))
+
+        def do_clear(box: Any) -> None:
+            box.destroy()
+            p = history_path(L["lib"].index_dir)
+            if os.path.exists(native_path(p)):
+                try:
+                    os.remove(native_path(p))
+                except OSError as exc:
+                    messagebox.showerror("清除失败", str(exc))
+                    return
+            refresh_history_tab()
 
     reload_history_tab = refresh_history_tab   # 供爬取完成回调复用
 
