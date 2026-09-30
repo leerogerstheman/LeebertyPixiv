@@ -2980,6 +2980,22 @@ def dtag_histogram(recs: Sequence[Dict[str, Any]]) -> List[Tuple[str, int]]:
     return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
+def author_histogram(recs: Sequence[Dict[str, Any]]) -> List[Tuple[str, str, int]]:
+    """统计图库里的画师（ID, 名, 出现次数），按次数从多到少。"""
+    counter: Dict[str, List[Any]] = {}
+    for r in recs:
+        aid = str(r.get("author_id") or "").strip()
+        if not aid:
+            continue
+        name = str(r.get("author") or "").strip() or aid
+        e = counter.setdefault(aid, [name, 0])
+        if not e[0]:
+            e[0] = name
+        e[1] += 1
+    return sorted(((aid, e[0], e[1]) for aid, e in counter.items()),
+                  key=lambda kv: (-kv[2], kv[1]))
+
+
 # --------------------------------------------------------------------------------------
 # 衍生标签（dtags）与爬取历史
 #
@@ -7052,7 +7068,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     # 画师 ID：精确筛选（可填多个，用逗号分隔；支持主页链接）
     ttk.Label(srow1, text="画师ID：").pack(side="left", padx=(8, 0))
     q_aid_var = tk.StringVar()
-    ttk.Entry(srow1, textvariable=q_aid_var, width=18).pack(side="left")
+    q_aid_entry = ttk.Entry(srow1, textvariable=q_aid_var, width=18)
+    q_aid_entry.pack(side="left")
     ttk.Label(srow1, text="排序：").pack(side="left", padx=(8, 0))
     q_sort_var = tk.StringVar(value="default")
     ttk.Combobox(srow1, textvariable=q_sort_var, width=10, state="readonly",
@@ -7115,9 +7132,22 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     ttk.Label(dtag_row, text="　快速过滤：").pack(side="left")
     dtag_filter_cb = ttk.Combobox(dtag_row, textvariable=dtag_filter_var, width=16)
     dtag_filter_cb.pack(side="left")
-    ttk.Entry(dtag_row, textvariable=dtag_filter_var, width=14).pack(side="left")
+    ttk.Label(dtag_row, text="（可输入过滤，或从候选里选）", foreground="#888").pack(side="left", padx=(6, 0))
     ttk.Button(dtag_row, text="编辑衍生标签…",
                command=lambda: edit_dtags_dialog()).pack(side="left", padx=(10, 0))
+
+    # ---- 画师ID筛选区（夹在原TAG与衍生TAG之间）----
+    aid_row = ttk.Frame(tab_lib, padding=(0, 0, 0, 4))
+    aid_row.pack(fill="x")
+    ttk.Label(aid_row, text="画师ID筛选（可多选 Ctrl/Shift；选中的画师都会显示）：").pack(side="left")
+    ttk.Label(aid_row, text="　快速过滤：").pack(side="left")
+    aid_filter_var = tk.StringVar()
+    aid_filter_cb = ttk.Combobox(aid_row, textvariable=aid_filter_var, width=16)
+    aid_filter_cb.pack(side="left")
+    ttk.Label(aid_row, text="（输入画师名/ID 过滤列表，或从候选里选）",
+              foreground="#888").pack(side="left", padx=(6, 0))
+    ttk.Button(aid_row, text="清除画师筛选",
+               command=lambda: clear_aid_filter()).pack(side="left", padx=(10, 0))
 
     trow = ttk.Frame(tab_lib)
     trow.pack(fill="both", expand=True)
@@ -7129,17 +7159,25 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     tag_box.configure(yscrollcommand=tag_sb.set)
     ttk.Label(trow, text="原TAG", foreground="#888").grid(row=1, column=0, sticky="w")
 
+    aid_box = tk.Listbox(trow, selectmode="extended", width=26, height=12,
+                         font=("Microsoft YaHei UI", 9), exportselection=False)
+    aid_box.grid(row=0, column=2, sticky="nsw", padx=(8, 0))
+    aid_sb = ttk.Scrollbar(trow, command=aid_box.yview)
+    aid_sb.grid(row=0, column=3, sticky="ns")
+    aid_box.configure(yscrollcommand=aid_sb.set)
+    ttk.Label(trow, text="画师（可多选）", foreground="#086").grid(row=1, column=2, sticky="w")
+
     dtag_box = tk.Listbox(trow, selectmode="extended", width=26, height=12,
                           font=("Microsoft YaHei UI", 9), exportselection=False)
-    dtag_box.grid(row=0, column=2, sticky="nsw", padx=(8, 0))
+    dtag_box.grid(row=0, column=4, sticky="nsw", padx=(8, 0))
     dtag_sb = ttk.Scrollbar(trow, command=dtag_box.yview)
-    dtag_sb.grid(row=0, column=3, sticky="ns")
+    dtag_sb.grid(row=0, column=5, sticky="ns")
     dtag_box.configure(yscrollcommand=dtag_sb.set)
-    ttk.Label(trow, text="衍生TAG（可编辑）", foreground="#06c").grid(row=1, column=2, sticky="w")
+    ttk.Label(trow, text="衍生TAG（可编辑）", foreground="#06c").grid(row=1, column=4, sticky="w")
 
     res_frame = ttk.Frame(trow)
-    res_frame.grid(row=0, column=4, sticky="nsew", padx=(8, 0))
-    trow.columnconfigure(4, weight=1)
+    res_frame.grid(row=0, column=6, sticky="nsew", padx=(8, 0))
+    trow.columnconfigure(6, weight=1)
     trow.rowconfigure(0, weight=1)
 
     cols = ("id", "title", "author", "tags", "dtags", "likes", "bm", "date", "size", "file")
@@ -7265,6 +7303,81 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             if name in keep:
                 dtag_box.selection_set(i)
 
+    def _aid_selected_ids() -> List[str]:
+        """画师列表当前选中的画师ID（列表项形如「画师名　(数)」，需要按索引查 records 拿 ID）。"""
+        ids: List[str] = []
+        for i in aid_box.curselection():
+            label = aid_box.get(i)
+            # 用 label 反向匹配 records：author 名相同 + 出现次数相同
+            name = label.rsplit("　(", 1)[0]
+            for r in L["recs"]:
+                if str(r.get("author") or "").strip() == name:
+                    aid = str(r.get("author_id") or "").strip()
+                    if aid and aid not in ids:
+                        ids.append(aid)
+                        break
+        return ids
+
+    def load_aid_list() -> None:
+        """把图库里的画师按作品数填进列表（画师名　(作品数)），并按过滤词过滤。"""
+        sel_prev = _aid_selected_ids()
+        aid_box.delete(0, "end")
+        kw = aid_filter_var.get().strip().lower()
+        for aid, name, n in author_histogram(L["recs"]):
+            if kw and kw not in str(name).lower() and kw not in aid:
+                continue
+            aid_box.insert("end", f"{name}　({n})")
+        # 恢复选中
+        for i in range(aid_box.size()):
+            label = aid_box.get(i)
+            name = label.rsplit("　(", 1)[0]
+            for r in L["recs"]:
+                if str(r.get("author") or "").strip() == name and \
+                        str(r.get("author_id") or "").strip() in sel_prev:
+                    aid_box.selection_set(i)
+                    break
+
+    def clear_aid_filter() -> None:
+        """清除画师筛选：清空列表选择、顶部输入框与过滤词。"""
+        aid_box.selection_clear(0, "end")
+        q_aid_var.set("")
+        aid_filter_var.set("")
+        aid_filter_cb.set("")
+        load_aid_list()
+        run_search()
+
+    def _on_aid_select(*_a: Any) -> None:
+        # 点选画师 → 同步到 q_aid_var → 检索
+        ids = _aid_selected_ids()
+        q_aid_var.set(", ".join(ids))
+        run_search()
+
+    def _on_aid_filter(*_a: Any) -> None:
+        aid_filter_cb["values"] = _suggest_aids(aid_filter_var.get())
+        load_aid_list()
+
+    def _on_aid_filter_pick(_e: Any = None) -> None:
+        sel_txt = aid_filter_cb.get().strip()
+        if not sel_txt:
+            return
+        name = sel_txt.rsplit("　(", 1)[0]
+        sel_prev = _aid_selected_ids()
+        aid_box.selection_clear(0, "end")
+        for i in range(aid_box.size()):
+            if aid_box.get(i).rsplit("　(", 1)[0] == name:
+                aid_box.selection_set(i)
+                break
+        _on_aid_select()
+
+    def _suggest_aids(prefix: str) -> List[str]:
+        p = prefix.strip().lower()
+        if not p:
+            return [f"{name}　({n})" for aid, name, n in
+                    author_histogram(L["recs"])[:8]]
+        cands = [(aid, name, n) for aid, name, n in author_histogram(L["recs"])
+                 if p in str(name).lower() or p in aid]
+        return [f"{name}　({n})" for aid, name, n in cands[:20]]
+
     def edit_dtags_dialog() -> None:
         """编辑选中作品的衍生标签：原TAG只读展示，衍生TAG可增删、可一键导入原TAG。"""
         sel = tree.selection()
@@ -7347,6 +7460,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         def load_dtags_now() -> None:
             L["recs"] = L["lib"].load_records()
             load_dtag_list()
+            load_aid_list()
 
         ttk.Button(dlg, text="完成", command=apply_close).pack(anchor="e", padx=12, pady=8)
 
@@ -7460,7 +7574,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     for txt, fn in (("检索", run_search), ("重置", reset_search), ("打开图片", open_selected),
                     ("打开所在文件夹", open_selected_folder), ("导出 CSV", export_hits)):
         ttk.Button(brow, text=txt, command=fn).pack(side="right", padx=2)
-    for w in (qe,):
+    for w in (qe, q_aid_entry):
         w.bind("<Return>", run_search)
     def _suggest_tags(prefix: str, hist: List[Tuple[str, int]]) -> List[str]:
         """给输入框的自动补全候选：匹配前缀/包含的已存在标签，按出现次数排序。"""
@@ -7498,6 +7612,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         dtag_filter_cb["values"] = _suggest_tags(dtag_filter_var.get(),
                                                  dtag_histogram(L["recs"]))
         load_dtag_list()
+        load_aid_list()
 
     def _on_dtag_filter_pick(_e: Any = None) -> None:
         sel = dtag_filter_cb.get().strip()
@@ -7514,13 +7629,17 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
 
     tag_filter_var.trace_add("write", _on_tag_filter)
     dtag_filter_var.trace_add("write", _on_dtag_filter)
+    aid_filter_var.trace_add("write", _on_aid_filter)
     tag_filter_cb.bind("<<ComboboxSelected>>", _on_tag_filter_pick)
     dtag_filter_cb.bind("<<ComboboxSelected>>", _on_dtag_filter_pick)
+    aid_filter_cb.bind("<<ComboboxSelected>>", _on_aid_filter_pick)
     # 单击标签即检索（多选时每次释放也刷新）；双击保留
     tag_box.bind("<ButtonRelease-1>", lambda _e: run_search())
     dtag_box.bind("<ButtonRelease-1>", lambda _e: run_search())
+    aid_box.bind("<ButtonRelease-1>", _on_aid_select)
     tag_box.bind("<Double-1>", run_search)
     dtag_box.bind("<Double-1>", run_search)
+    aid_box.bind("<Double-1>", _on_aid_select)
 
     # ==================================================================================
     # 标签页 3：图库位置
@@ -7578,6 +7697,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         lib_count_var.set(f"记录：{len(recs)}")
         load_tags()
         load_dtag_list()
+        load_aid_list()
         run_search()
 
     def browse_library() -> None:
@@ -7623,6 +7743,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         refresh_lib_info()
         load_tags()
         load_dtag_list()
+        load_aid_list()
         run_search()
         messagebox.showinfo("已切换图库位置",
                             f"新位置：{new}\n配置已保存到：{cfg_path}\n\n"
@@ -8044,6 +8165,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         hist_status_var.set(f"共 {len(entries)} 次爬取")
         # 更新状态栏与衍生标签列表（每次爬取都会新增「第N次爬取」衍生标签）
         load_dtag_list()
+        load_aid_list()
 
     def clear_history() -> None:
         """清空爬取历史。破坏性操作：先弹详细警告，默认不建议。"""
@@ -8259,6 +8381,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                     refresh_list()
                     load_tags()
                     load_dtag_list()
+                    load_aid_list()
                     run_search()
                     refresh_history_tab()
                     continue
@@ -8283,6 +8406,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                         refresh_list()
                         load_tags()
                         load_dtag_list()
+                        load_aid_list()
                         run_search()
                         refresh_history_tab()
                         # 同步完成后跳转到「图库检索」页，自动按这批画师筛选，
