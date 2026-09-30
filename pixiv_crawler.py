@@ -8254,6 +8254,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         L["busy"] = True
         log.delete("1.0", "end")
         status_var.set("正在爬取…")
+        batch_dtags_btn.configure(state="disabled")   # 新一批开始时清掉"上一批可标记"
+        L["last_crawl_works"] = []
         crawl_prog.configure(value=0)
         crawl_prog_var.set("准备中…")
         L["stop_evt"] = threading.Event()
@@ -8295,6 +8297,57 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         evt.set()
         status_var.set("已请求停止，正在保存…（已下载内容不会丢）")
         crawl_prog_var.set("正在停止…")
+
+    def mark_batch_dtags() -> None:
+        """给「最近一次爬取」的这批新作品批量添加衍生标签。
+
+        爬取结束时 DONE 处理器会把本次 new_works 存进 L["last_crawl_works"]；
+        这里弹窗让用户输入一个或多个衍生标签，然后批量写入 dtags.json。
+        """
+        works = L.get("last_crawl_works") or []
+        if not works:
+            messagebox.showinfo("提示", "还没有可标记的爬取结果。\n"
+                                        "请先完成一次爬取（或追更同步），结束后就能给"
+                                        "这批新下载的图批量加标签。")
+            return
+        dlg = tk.Toplevel(root)
+        dlg.title(f"给本次爬取的 {len(works)} 个作品加衍生标签")
+        dlg.transient(root)
+        dlg.grab_set()
+        ttk.Label(dlg, text=f"本次爬取新下载了 {len(works)} 个作品，将给这**一批**统一加衍生标签：",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=14, pady=(14, 2))
+        ttk.Label(dlg, text="标签可填多个，用逗号 / 空格 / 顿号分隔（例如：收藏, 壁纸 2026）：",
+                  foreground="#555").pack(anchor="w", padx=14)
+        var = tk.StringVar()
+        ent = ttk.Entry(dlg, textvariable=var, width=52)
+        ent.pack(padx=14, fill="x", pady=8)
+        info = tk.StringVar(value="")
+        ttk.Label(dlg, textvariable=info, foreground="#c00").pack(anchor="w", padx=14)
+
+        def ok() -> None:
+            raw = var.get()
+            tags = [s.strip() for s in re.split(r"[,，、\s]+", raw) if s.strip()]
+            if not tags:
+                info.set("请至少填一个标签")
+                return
+            idx = L["lib"].index_dir
+            for wid in works:
+                add_work_dtags(idx, wid, tags)
+            dlg.destroy()
+            # 刷新图库（列表、衍生标签、检索）
+            refresh_list()
+            load_tags()
+            load_dtag_list()
+            run_search()
+            logln(f"[i] 已给本次爬取的 {len(works)} 个作品批量添加衍生标签：{'、'.join(tags)}")
+            status_var.set(f"已标记 {len(works)} 个作品")
+
+        row = ttk.Frame(dlg)
+        row.pack(fill="x", padx=14, pady=(4, 12))
+        ttk.Button(row, text="确定", command=ok).pack(side="left")
+        ttk.Button(row, text="取消", command=dlg.destroy).pack(side="left", padx=6)
+        ent.bind("<Return>", lambda _e: ok())
+        ent.focus_set()
 
     def _render_crawl_progress(kw: Dict[str, Any]) -> None:
         """把后台上报的进度渲染到爬取页进度条。kw 来自 CrawlSession.report。"""
@@ -8378,6 +8431,14 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                     crawl_prog.configure(value=0)
                     crawl_prog_var.set("就绪")
                     L.pop("stop_evt", None)
+                    # 记录本次爬取的新作品，供「标记这批图」按钮用（读爬取历史最后一条）
+                    try:
+                        hist = load_crawl_history(L["lib"].index_dir)
+                        last = hist[-1] if hist else {}
+                        L["last_crawl_works"] = list(last.get("new_works") or [])
+                    except Exception:  # noqa: BLE001
+                        L["last_crawl_works"] = []
+                    batch_dtags_btn.configure(state="normal")
                     refresh_list()
                     load_tags()
                     load_dtag_list()
@@ -8489,6 +8550,10 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     est_btn = ttk.Button(crawl_btns, text="预估（建议先点）", command=start_estimate)
     est_btn.pack(side="left", padx=(6, 0))
     ttk.Button(crawl_btns, text="停止", command=lambda: stop_crawl()).pack(side="left", padx=(10, 0))
+    # 标记这批图：爬取完成后可点（给本次新下载的作品批量加衍生标签）
+    batch_dtags_btn = ttk.Button(crawl_btns, text="标记这批图…", state="disabled",
+                                 command=lambda: mark_batch_dtags())
+    batch_dtags_btn.pack(side="left", padx=(6, 0))
     ttk.Label(crawl_btns, textvariable=status_var).pack(side="left", padx=12)
     ttk.Button(crawl_btns, text="打开图库目录",
                command=lambda: open_path(L["lib"].root)).pack(side="right", padx=2)
