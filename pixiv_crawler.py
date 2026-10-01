@@ -104,17 +104,20 @@ PAGES_URL = "https://www.pixiv.net/ajax/illust/{iid}/pages"
 UGOIRA_META_URL = "https://www.pixiv.net/ajax/illust/{iid}/ugoira_meta"
 USER_ALL_URL = "https://www.pixiv.net/ajax/user/{uid}/profile/all"
 USER_ILLUSTS_URL = "https://www.pixiv.net/ajax/user/{uid}/profile/illusts"
+USER_BOOKMARKS_URL = "https://www.pixiv.net/ajax/user/{uid}/illusts/bookmarks"
 WHOAMI_URL = "https://www.pixiv.net/ajax/user/self"
 APP_SEARCH_URL = "https://app-api.pixiv.net/v1/search/illust"
 APP_DETAIL_URL = "https://app-api.pixiv.net/v1/illust/detail"
+APP_BOOKMARKS_URL = "https://app-api.pixiv.net/v1/user/bookmarks/illust"
 APP_TOKEN_URL = "https://oauth.secure.pixiv.net/auth/token"
 
 ENDPOINT_DEFAULTS: Dict[str, str] = {
     "search": SEARCH_URL, "illust": ILLUST_URL, "pages": PAGES_URL,
     "ugoira_meta": UGOIRA_META_URL, "user_all": USER_ALL_URL,
-    "user_illusts": USER_ILLUSTS_URL, "whoami": WHOAMI_URL,
+    "user_illusts": USER_ILLUSTS_URL, "user_bookmarks": USER_BOOKMARKS_URL,
+    "whoami": WHOAMI_URL,
     "app_search": APP_SEARCH_URL, "app_detail": APP_DETAIL_URL,
-    "app_token": APP_TOKEN_URL,
+    "app_bookmarks": APP_BOOKMARKS_URL, "app_token": APP_TOKEN_URL,
 }
 
 
@@ -1791,6 +1794,106 @@ class PixivClient:
             "frames": frames if isinstance(frames, list) else [],
             "ext": guess_ext(url, ".zip"),
         }
+
+    def collect_bookmarks(self, user_id: str, *, rest: str = "show",
+                          max_works: int = 0, tag: str = "",
+                          log=out) -> Tuple[List[Dict[str, Any]], int]:
+        """拉取某用户收藏夹里的作品简表（网页书签接口，分页取全）。
+
+        rest: "show"=公开收藏（任何人可见，网页接口即可）
+              "hide"=私密收藏（仅本人 + 需要 refresh_token/App API）
+        返回 (作品简表列表, 找到的作品总数)。简表字段与搜索列表一致
+        （id/title/tags/aiType/pageCount 等），可在列表阶段筛选，不额外消耗请求。
+        """
+        briefs: List[Dict[str, Any]] = []
+        total = 0
+        offset = 0
+        limit = 48
+        # 私密收藏必须走 App API（网页接口不提供 hide）
+        if rest == "hide":
+            if not self.access_token:
+                raise CrawlError("爬取私密收藏需要 refresh_token（App API 登录）。"
+                                 "用 `auth login --method token` 登录后再试。")
+            url = endpoint_url(self.cfg, "app_bookmarks")
+            q = urllib.parse.urlencode({"user_id": str(user_id), "rest": "hide"})
+            next_url = f"{url}?{q}"
+            hdr = {**self._auth_headers(), "User-Agent": APP_UA}
+            while next_url:
+                data = self.http.get_json(next_url, headers=hdr)
+                if not isinstance(data, dict):
+                    break
+                items = data.get("illusts") or []
+                for it in items:
+                    sid = str(it.get("id") or "")
+                    if not sid:
+                        continue
+                    briefs.append({
+                        "id": sid,
+                        "title": it.get("title") or "",
+                        "userId": str((it.get("user") or {}).get("id") or ""),
+                        "userName": str((it.get("user") or {}).get("name") or ""),
+                        "pageCount": it.get("page_count") or 1,
+                        "xRestrict": it.get("x_restrict") or 0,
+                        "illustType": it.get("type") or "illust",
+                        "createDate": it.get("create_date") or "",
+                        "tags": [{"tag": str(t)} if isinstance(t, str) else t
+                                 for t in (it.get("tags") or [])],
+                        "aiType": 1 if (it.get("ai_type") or 0) != 0 else 0,
+                    })
+                total = len(briefs)
+                nxt = data.get("next_url")
+                if nxt and (max_works <= 0 or len(briefs) < max_works):
+                    next_url = nxt
+                    if self.verbose:
+                        time.sleep(float(self.cfg.get("search_delay") or 0.3))
+                else:
+                    break
+            return briefs[:max_works] if max_works > 0 else briefs, total
+
+        # ---- 公开收藏：网页接口 ----
+        hdr = self._auth_headers()
+        while True:
+            params = {"tag": tag, "offset": offset, "limit": limit, "rest": "show"}
+            url = endpoint_url(self.cfg, "user_bookmarks",
+                               uid=str(user_id)) + "?" + urllib.parse.urlencode(params)
+            payload = self.http.get_json(url, headers=hdr)
+            body = (payload or {}).get("body") or {}
+            items = body.get("works") or []
+            if body.get("total") is None and not items:
+                # total/tag 字段结构变了 —— 大概率改版
+                if isinstance(body, dict) and "works" not in body:
+                    raise ApiShapeError(_shape_msg(f"收藏夹（{user_id}）", "body.works",
+                                                  payload or {}))
+            total = int(body.get("total") or 0)
+            for w in items:
+                if not isinstance(w, dict):
+                    continue
+                sid = str(w.get("id") or "")
+                if not sid:
+                    continue
+                briefs.append({
+                    "id": sid,
+                    "title": w.get("title") or "",
+                    "userId": str(w.get("userId") or ""),
+                    "userName": str(w.get("userName") or ""),
+                    "pageCount": int(w.get("pageCount") or 1),
+                    "xRestrict": int(w.get("xRestrict") or 0),
+                    "illustType": w.get("illustType") or "illust",
+                    "createDate": w.get("createDate") or "",
+                    "tags": w.get("tags") or [],
+                    "aiType": int(w.get("aiType") or 0) if w.get("aiType") is not None else 0,
+                })
+            if max_works > 0 and len(briefs) >= max_works:
+                break
+            if len(items) < limit or offset + len(items) >= total:
+                break
+            offset += len(items)
+            if self.verbose:
+                log(f"  [i] 收藏夹翻页：已取 {len(briefs)}/{total}")
+                time.sleep(float(self.cfg.get("search_delay") or 0.3))
+        if self.verbose:
+            log(f"  [i] 收藏夹共 {total} 个作品，已取 {len(briefs)} 个")
+        return briefs[:max_works] if max_works > 0 else briefs, total
 
     def resolve_original_urls(self, illust_id: str,
                               detail: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -4342,6 +4445,101 @@ class CrawlSession:
         return {"works": total_seen, "new": total_new, "downloaded": self.downloaded,
                 "failed": self.failed, "per_artist": per_artist}
 
+    def crawl_bookmarks(self, user_id: str, *, rest: str = "show", tag: str = "",
+                        max_works: int = 0, dry_run: bool = False,
+                        order: str = "date") -> Dict[str, int]:
+        """爬取某用户收藏夹里的作品（增量：已下载的自动跳过）。
+
+        收藏简表自带 tags/aiType/xRestrict/pageCount/createDate，
+        所以分级/AI/画师/时间/已下载都能在**列表阶段**过滤，比画师追更省详情请求。
+        """
+        known = self.known
+        briefs, total = self.client.collect_bookmarks(
+            user_id, rest=rest, tag=tag, max_works=0, log=out)
+        if not briefs:
+            out(f"  收藏夹（{user_id}）没有可用的作品（或接口返回为空）。")
+            return {"works": 0, "downloaded": 0, "skipped": 0, "failed": 0, "new": 0}
+
+        # 列表阶段筛选：重复 / 分级 / AI / 画师
+        kept: List[Dict[str, Any]] = []
+        for b in briefs:
+            iid = str(b.get("id") or "")
+            if not iid:
+                continue
+            if iid in known:
+                continue
+            xr = int(b.get("xRestrict") or 0)
+            if self.r18_levels != R18_LEVELS and xr not in self.r18_levels:
+                self.skipped_r18 += (xr == 1 or xr == 2)
+                continue
+            is_ai = int(b.get("aiType") or 0) != 0
+            if self.ai_only and not is_ai:
+                continue
+            if self.ai_exclude and is_ai:
+                continue
+            if self.artist_ids and str(b.get("userId") or "") not in self.artist_ids:
+                continue
+            kept.append(b)
+        new_ids = [str(b.get("id")) for b in kept]
+        out(f"  收藏夹共 {total} 个作品；其中 {len(briefs) - len(new_ids)} 个已在图库/被筛选掉，"
+            f"**待处理 {len(new_ids)} 个**")
+        if not new_ids:
+            out("  没有需要下载的作品。")
+            return {"works": total, "downloaded": 0, "skipped": 0, "failed": 0, "new": 0}
+        if order == "old":
+            new_ids = list(reversed(new_ids))
+        cap = max_works if max_works > 0 else int(self.cfg.get("max_works_per_run") or 0)
+        if dry_run:
+            out(f"  [dry-run] 待下载 {len(new_ids)} 个，前几个 ID："
+                f"{'、'.join(new_ids[:12])}"
+                + (f"…（共 {len(new_ids)} 个）" if len(new_ids) > 12 else ""))
+            return {"works": total, "downloaded": 0, "skipped": 0, "failed": 0,
+                    "new": len(new_ids)}
+
+        targets = new_ids[:cap] if cap > 0 else new_ids
+        query_keys = dedupe_keep_order([f"bookmarks:{user_id}", user_id])
+        concurrency = max(1, int(self.cfg.get("concurrency") or 4))
+        out(f"  开始处理 {len(targets)} 个新作品（并发下载 {concurrency}）…")
+        pending: List[Dict[str, Any]] = []
+        by_id = {str(b.get("id")): b for b in kept}
+        processed = 0
+        for rank, wid in enumerate(targets, 1):
+            if self.should_stop():
+                out(f"  [停止] 用户请求停止，已保存 {processed}/{len(targets)} 个作品的处理进度")
+                break
+            self.report(stage="bookmarks", done=rank, total=len(targets), detail=wid)
+            b = by_id.get(wid) or {}
+            brief = {"id": wid, "title": b.get("title") or "",
+                     "pageCount": int(b.get("pageCount") or 1),
+                     "xRestrict": int(b.get("xRestrict") or 0),
+                     "illustType": b.get("illustType") or "illust"}
+            try:
+                detail, tasks = self.prepare_work(brief, f"bookmarks:{user_id}",
+                                                  rank, order, query_keys)
+            except CrawlError as exc:
+                self.failed += 1
+                out(f"  [warn] 作品 {wid} 处理失败：{exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                self.failed += 1
+                out(f"  [warn] 作品 {wid} 异常：{type(exc).__name__}: {exc}")
+                continue
+            if detail is not None:
+                pending.extend([t for t in tasks if t["need"]])
+            processed += 1
+            if len(pending) >= 60:
+                self._drain(pending, concurrency)
+                pending = []
+                self._flush_index()
+            time.sleep(float(self.cfg.get("search_delay") or 0.3))
+        if pending:
+            self._drain(pending, concurrency)
+        self._flush_index()
+        out(f"  收藏夹完成：新下载 {self.downloaded} 张，失败 {self.failed}"
+            f"（共处理 {processed} 个新作品）")
+        return {"works": total, "downloaded": self.downloaded, "skipped": self.skipped,
+                "failed": self.failed, "new": len(targets)}
+
     def _drain(self, tasks: List[Dict[str, Any]], concurrency: int) -> None:
         if not tasks:
             return
@@ -4731,9 +4929,49 @@ def cmd_estimate(args: argparse.Namespace, program_dir: Path) -> int:
     return 0
 
 
+def cmd_crawl_bookmarks(args: argparse.Namespace, program_dir: Path,
+                        cfg: Dict[str, Any], lib: Library) -> int:
+    """收藏夹模式入口：--from-bookmarks <用户ID>（可选 --bookmark-rest hide / --bookmark-tag）。"""
+    order = str(getattr(args, "order", None) or cfg.get("order") or "date")
+    max_works = int(getattr(args, "limit", 0) or cfg.get("max_works_per_run") or 0)
+    try:
+        levels = parse_r18_levels(getattr(args, "r18_levels", None))
+    except ValueError as exc:
+        out(f"[错误] {exc}")
+        return 2
+    ai_mode = str(getattr(args, "ai_mode", None) or cfg.get("ai_mode") or "all")
+    uids = list(getattr(args, "from_bookmarks", None) or [])
+    out("=" * 68)
+    out(f"收藏夹模式：用户 {uids[0]}"
+        + ("（公开收藏）" if str(getattr(args, "bookmark_rest", "show")) != "hide" else "（私密收藏）"))
+    out("=" * 68)
+    run_crawl(
+        cfg, lib, [],
+        order=order, mode="all", s_mode="s_tag",
+        max_works=max_works, force=bool(getattr(args, "force", False)),
+        deep=False, dry_run=bool(getattr(args, "dry_run", False)),
+        deep_all=False, restart=bool(getattr(args, "restart", False)),
+        r18_levels=levels, ai_mode=ai_mode,
+        artist_ids=getattr(args, "artist_ids", None),
+        scope="bookmarks",
+        bookmark_uids=uids,
+        bookmark_rest=str(getattr(args, "bookmark_rest", None) or "show"),
+        bookmark_tag=str(getattr(args, "bookmark_tag", None) or ""),
+    )
+    return 0
+
+
 def cmd_crawl(args: argparse.Namespace, program_dir: Path) -> int:
     cfg, lib = prepare_cfg(args, program_dir)
     keywords: List[str] = list(args.keywords or [])
+    # 收藏夹模式：不需要关键词（用 --from-bookmarks <用户ID> 指定）
+    if getattr(args, "from_bookmarks", None) or \
+            str(getattr(args, "scope", None) or "") == "bookmarks":
+        fm = getattr(args, "from_bookmarks", None)
+        if not fm:
+            out("[!] 收藏夹模式需要指定用户 ID：--from-bookmarks <用户ID>")
+            return 2
+        return cmd_crawl_bookmarks(args, program_dir, cfg, lib)
     if args.interactive or not keywords:
         out("\n请输入要爬取的关键词（多个关键词用空格分隔，直接回车结束）：")
         try:
@@ -4794,6 +5032,11 @@ def cmd_crawl(args: argparse.Namespace, program_dir: Path) -> int:
         deep_all=bool(getattr(args, "deep_all", False)), restart=bool(getattr(args, "restart", False)),
         r18_levels=levels, ai_mode=ai_mode,
         artist_ids=getattr(args, "artist_ids", None),
+        scope=str(getattr(args, "scope", None) or "auto"),
+        bookmark_uids=(getattr(args, "from_bookmarks", None) or [None]
+                       if getattr(args, "scope", None) == "bookmarks" else None),
+        bookmark_rest=str(getattr(args, "bookmark_rest", None) or "show"),
+        bookmark_tag=str(getattr(args, "bookmark_tag", None) or ""),
     )
     return 0
 
@@ -4948,12 +5191,16 @@ def run_crawl(
     segmented: bool = False,
     seg_start: Any = None,
     seg_end: Any = None,
+    bookmark_uids: Optional[Sequence[str]] = None,
+    bookmark_rest: str = "show",
+    bookmark_tag: str = "",
     stop_event: Optional[Any] = None,
     progress_cb: Optional[Any] = None,
     log=out,
 ) -> Dict[str, Any]:
     """爬取主流程（命令行与图形界面共用）。log 可换成 GUI 的日志函数。"""
     session = CrawlSession(cfg, lib, verbose=True)
+    started = time.time()
     if stop_event is not None:
         session.stop_event = stop_event
     if progress_cb is not None:
@@ -5003,6 +5250,31 @@ def run_crawl(
     scope = (scope or "auto").lower()
     if scope == "auto":
         scope = "artist" if (session.artist_ids and not keywords) else "keyword"
+    if scope == "bookmarks":
+        uid = str((bookmark_uids or [""])[0]).strip() if bookmark_uids else ""
+        if not uid:
+            log("[!] 检索范围选了「收藏夹」，但没有填用户 ID。")
+            return {"downloaded": 0, "skipped": 0, "failed": 0, "aborted": "no_bookmark_uid"}
+        if dry_run:
+            log("[i] 收藏夹简表自带标签/分级/AI，干跑就能看到筛选后的真实数字")
+        session.known = lib.known_ids_fast()
+        stats = session.crawl_bookmarks(uid, rest=bookmark_rest or "show",
+                                        tag=bookmark_tag or "", max_works=max_works,
+                                        dry_run=dry_run, order=order)
+        if not dry_run:
+            log("\n[i] 整理分类目录与索引…")
+            info = session.finalize(rebuild=True)
+            log(f"\n新下载图片 {info.get('downloaded', 0)} 张，"
+                f"图库共 {info.get('total_records', 0)} 条记录")
+            stats.update({"added": info.get("added", 0), "updated": info.get("updated", 0),
+                          "total_records": info.get("total_records", 0)})
+            finalize_run_record(session, lib, mode="bookmarks",
+                                keywords=[f"bookmarks:{uid}"],
+                                params={"rest": bookmark_rest or "show",
+                                        "max_works": max_works,
+                                        "bookmark_tag": bookmark_tag or ""},
+                                result=stats, started=started, log=log)
+        return stats
     if scope == "artist":
         if not session.artist_ids:
             log("[!] 检索范围选了「画师ID」，但没有填任何画师 ID。")
@@ -6555,7 +6827,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     scope_row.pack(fill="x", pady=1)
     ttk.Label(scope_row, text="检索范围：", width=10, anchor="w").pack(side="left")
     scope_var = tk.StringVar(value=str(cfg.get("scope") or "keyword"))
-    for _val, _txt in (("keyword", "关键词"), ("artist", "画师ID"), ("both", "两者都要")):
+    for _val, _txt in (("keyword", "关键词"), ("artist", "画师ID"),
+                       ("bookmarks", "收藏夹"), ("both", "两者都要")):
         ttk.Radiobutton(scope_row, text=_txt, value=_val, variable=scope_var,
                         command=lambda: _on_scope()).pack(side="left", padx=(0, 6))
 
@@ -6580,6 +6853,21 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     ttk.Label(aid_row, text="纯数字 ID 或主页链接，逗号分隔", foreground="#777").pack(
         side="left", padx=(6, 0))
 
+    bm_row = ttk.Frame(sec_scope)
+    bm_row.pack(fill="x", pady=1)
+    ttk.Label(bm_row, text="收藏夹：", width=10, anchor="w").pack(side="left")
+    bm_uid_var = tk.StringVar()
+    bm_uid_entry = ttk.Entry(bm_row, textvariable=bm_uid_var, width=20)
+    bm_uid_entry.pack(side="left")
+    bm_hide_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(bm_row, text="私密收藏", variable=bm_hide_var).pack(side="left", padx=(6, 0))
+    ttk.Label(bm_row, text="（私密仅本人可用，需 OAuth 登录）", foreground="#777").pack(
+        side="left", padx=(6, 0))
+    ttk.Label(bm_row, text="　收藏标签：").pack(side="left", padx=(8, 0))
+    bm_tag_var = tk.StringVar()
+    bm_tag_entry = ttk.Entry(bm_row, textvariable=bm_tag_var, width=12)
+    bm_tag_entry.pack(side="left")
+
     scope_hint_var = tk.StringVar(value="")
     scope_hint = ttk.Label(sec_scope, textvariable=scope_hint_var, foreground="#777",
                            justify="left")
@@ -6592,15 +6880,30 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             scope_hint_var.set("在 pixiv 按关键词搜（标签部分匹配）。单一排序约 6180 条上限，"
                                "勾「深度」可翻倍。")
             crawl_aid_entry.state(["disabled"])
+            _bm_entries_state("disabled")
         elif s == "artist":
             scope_hint_var.set("直接取这些画师的全部作品（走画师作品接口）："
                                "不受 6180 翻页上限、也不受「前排被 AI 占满」影响。"
                                "代价是逐个作品取详情，较慢。")
             crawl_aid_entry.state(["!disabled"])
+            _bm_entries_state("disabled")
+        elif s == "bookmarks":
+            scope_hint_var.set("爬取某用户收藏夹里的作品（增量：已下载的自动跳过）。"
+                               "收藏夹简表自带标签/分级/AI，筛选在列表阶段完成，省详情请求。"
+                               "公开收藏任何登录态可用；私密需 OAuth 登录。")
+            crawl_aid_entry.state(["disabled"])
+            _bm_entries_state("!disabled")
         else:
             scope_hint_var.set("在关键词结果里只留这些画师。注意：交集可能很少甚至为空 ——"
                                "关键词是标签部分匹配，某画师的作品不一定带这个标签。")
             crawl_aid_entry.state(["!disabled"])
+            _bm_entries_state("disabled")
+
+    def _bm_entries_state(mode: str) -> None:
+        for _w in (bm_uid_var, bm_hide_var, bm_tag_var):
+            pass
+        for _e in (bm_uid_entry, bm_tag_entry):
+            _e.state([mode])
 
     def pick_from_follow_list() -> None:
         """从「画师追更」清单里挑画师，省得手抄 ID。"""
@@ -8265,6 +8568,13 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         r18_levels = sub_cfg.get("r18_levels")
         ai_mode = str(sub_cfg.get("ai_mode") or "all")
         artist_ids = sub_cfg.get("artist_ids") or []
+        # 检索范围 / 收藏夹
+        crawl_scope = scope_var.get()
+        bm_uid = bm_uid_var.get().strip()
+        if crawl_scope == "bookmarks" and not bm_uid:
+            messagebox.showinfo("提示", "收藏夹模式需要填「收藏夹：」用户ID")
+            L["busy"] = False
+            return
 
         def on_progress(kw: Dict[str, Any]) -> None:
             msg_q.put(("__PROG__", kw))
@@ -8278,6 +8588,10 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                           deep=use_deep, dry_run=dry,
                           r18_levels=r18_levels, ai_mode=ai_mode,
                           artist_ids=artist_ids,
+                          scope=crawl_scope,
+                          bookmark_uids=[bm_uid] if crawl_scope == "bookmarks" else None,
+                          bookmark_rest="hide" if bm_hide_var.get() else "show",
+                          bookmark_tag=bm_tag_var.get().strip(),
                           stop_event=L["stop_evt"], progress_cb=on_progress,
                           log=lambda m: msg_q.put(m))
             except Exception as exc:  # noqa: BLE001
@@ -8665,6 +8979,12 @@ def build_parser(program_dir: Path) -> argparse.ArgumentParser:
     c.add_argument("--segment-target", dest="segment_target", type=int,
                    help=f"全量模式每段的目标条数（默认 {SEG_TARGET}，越小分得越细）")
     c.add_argument("-i", "--interactive", action="store_true", help="交互式输入关键词")
+    c.add_argument("--from-bookmarks", dest="from_bookmarks", action="append", metavar="用户ID",
+                   help="收藏夹模式：爬取该用户公开收藏夹里的作品（网页接口，任何登录态可用）")
+    c.add_argument("--bookmark-rest", dest="bookmark_rest", choices=["show", "hide"],
+                   help="收藏夹可见性：show=公开（默认），hide=私密（仅本人，需要 refresh_token）")
+    c.add_argument("--bookmark-tag", dest="bookmark_tag",
+                   help="只爬收藏夹里带这个收藏标签的作品（默认全部）")
 
     e = sub.add_parser("estimate", help="预估：算出一共能爬多少、要多大空间、要多久",
                        parents=[common])

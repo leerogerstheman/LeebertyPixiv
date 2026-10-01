@@ -1,4 +1,4 @@
-﻿# LeebertyPixiv — pixiv 关键词爬虫（原图下载 + 可检索图库）
+# LeebertyPixiv — pixiv 关键词爬虫（原图下载 + 可检索图库）
 
 > ## 🧪 测试版（BETA）
 >
@@ -28,7 +28,7 @@ python pixiv_crawler.py gui                     # 图形界面
 
 | 能力 | 说明 |
 | --- | --- |
-| **三种检索** | 关键词 / 画师ID（走作品全集接口，不受翻页上限）/ 全量分段（按时间切分，突破约 6000 条上限） |
+| **三种检索** | 关键词 / 画师ID（走作品全集接口，不受翻页上限）/ 全量分段（按时间切分，突破约 6000 条上限）/**收藏夹**（公开可爬、私密需 OAuth，列表阶段可筛分级/AI/画师） |
 | **筛选** | 时间范围（年月日三级联动）、点赞/收藏门槛、**R-18 / R-18G 独立开关**、**AIGC 排除/只要** |
 | **动图** | ugoira 转 webp / gif（用 ffmpeg），可自动删原始 zip |
 | **画师追更** | 订阅清单（`artists.txt`）+ 增量下载 + 上次追更时间；GUI「追更」页一键同步、进度条、安全停止后续跑 |
@@ -73,6 +73,9 @@ python pixiv_crawler.py crawl 初音ミク --min-likes 1000
 python pixiv_crawler.py crawl 初音ミク --keep-r18     # 收 R-18（默认跳过）
 python pixiv_crawler.py crawl 初音ミク --ai-exclude   # 排除 AI 生成
 python pixiv_crawler.py crawl --artist-id 73260619    # 按画师ID爬全部作品
+python pixiv_crawler.py crawl --from-bookmarks 12345   # 爬某用户公开收藏夹（增量）
+python pixiv_crawler.py crawl --from-bookmarks 12345 --bookmark-rest hide  # 私密收藏（需 OAuth）
+python pixiv_crawler.py crawl --from-bookmarks 12345 --bookmark-tag 初音ミク  # 只爬带收藏标签的
 python pixiv_crawler.py search 初音 --tag 雪ミク       # 检索图库
 python pixiv_crawler.py repair                        # 补齐缺失页/文件
 python pixiv_crawler.py repair --clean-tags           # 清洗拼接标签（如"初音ミク,"）
