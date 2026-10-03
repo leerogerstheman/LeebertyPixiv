@@ -3555,6 +3555,12 @@ class CrawlSession:
             with self.rec_lock:
                 self.failed += 1
             out(f"    [fail] {task['illust_id']}_p{task['page_index']} {note} ({task['url']})")
+            # 状态栏：上报这一张的失败详情（名称/格式/大小/成败）
+            self.report(stage="file", ok=False,
+                        name=str((task.get("detail") or {}).get("title")
+                                 or task.get("title") or "")[:60],
+                        file=f"{task['illust_id']}_p{task['page_index']}{task.get('ext') or ''}",
+                        size=0, note=str(note)[:40])
             return None
         size = file_size(dest)
         try:
@@ -3577,6 +3583,11 @@ class CrawlSession:
         extra = f"  → {rec['animated']}" if rec.get("animated") else ""
         out(f"    [ok] {rec['id']}_p{rec['page']} {format_size(size)}  "
             f"{rec['title'][:36]}{extra}")
+        # 状态栏：上报这一张的成功详情（名称/格式/大小/成败）
+        self.report(stage="file", ok=True, name=str(rec.get("title") or "")[:60],
+                    file=f"{rec['id']}_p{rec['page']}{rec.get('ext') or ''}",
+                    size=int(size), ext=str(rec.get("ext") or ""),
+                    note=str(rec.get("animated") or ""))
         return rec
 
     def _finish_ugoira(self, rec: Dict[str, Any], zip_path: Path,
@@ -8559,6 +8570,7 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
         status_var.set("正在爬取…")
         batch_dtags_btn.configure(state="disabled")   # 新一批开始时清掉"上一批可标记"
         L["last_crawl_works"] = []
+        crawl_file_var.set("")
         crawl_prog.configure(value=0)
         crawl_prog_var.set("准备中…")
         L["stop_evt"] = threading.Event()
@@ -8666,6 +8678,22 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     def _render_crawl_progress(kw: Dict[str, Any]) -> None:
         """把后台上报的进度渲染到爬取页进度条。kw 来自 CrawlSession.report。"""
         stage = kw.get("stage")
+        # 单张文件的结果：渲染到「文件状态栏」（名称/格式/大小/成败）
+        if stage == "file":
+            ok = bool(kw.get("ok"))
+            name = str(kw.get("name") or "(无标题)")
+            ext = str(kw.get("ext") or "").lstrip(".").upper() or "?"
+            size = int(kw.get("size") or 0)
+            note = str(kw.get("note") or "")
+            mark = "✓ 成功" if ok else "✗ 失败"
+            size_txt = format_size(size) if size else "—"
+            line = f"{mark}　{name}　[{ext}]　{size_txt}"
+            if note:
+                line += f"　{note}"
+            crawl_file_var.set(line[:120])
+            # 成功/失败都用颜色区分，一眼能看出来
+            crawl_file_lbl.configure(foreground="#0a7" if ok else "#c00")
+            return
         done = int(kw.get("done") or 0)
         total = int(kw.get("total") or 1)
         detail = str(kw.get("detail") or "")
@@ -8673,7 +8701,8 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
             crawl_prog.configure(maximum=total, value=done)
         pct = int(done * 100 / total) if total else 0
         stage_names = {"combo": "搜索组合", "artist": "作品", "artist_scan": "画师",
-                       "artist_dl": "作品", "follow": "画师", "walk": "时间段"}
+                       "artist_dl": "作品", "follow": "画师", "walk": "时间段",
+                       "bookmarks": "收藏"}
         label = stage_names.get(stage, stage)
         crawl_prog_var.set(f"{label}{done}/{total}（{pct}%）　{detail[:36]}")
 
@@ -8745,7 +8774,6 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
                     crawl_prog.configure(value=0)
                     crawl_prog_var.set("就绪")
                     L.pop("stop_evt", None)
-                    # 记录本次爬取的新作品，供「标记这批图」按钮用（读爬取历史最后一条）
                     try:
                         hist = load_crawl_history(L["lib"].index_dir)
                         last = hist[-1] if hist else {}
@@ -8853,11 +8881,17 @@ def cmd_gui(args: argparse.Namespace, program_dir: Path) -> int:
     # 进度行：进度条 + 当前任务指示（爬取页进度）
     crawl_prog_row = ttk.Frame(tab_crawl, padding=(0, 0, 0, 4))
     crawl_prog_row.pack(fill="x", side="bottom")
-    crawl_prog = ttk.Progressbar(crawl_prog_row, maximum=100, value=0, length=320)
+    crawl_prog = ttk.Progressbar(crawl_prog_row, maximum=100, value=0, length=200)
     crawl_prog.pack(side="left", fill="x", expand=True)
     crawl_prog_var = tk.StringVar(value="就绪")
     ttk.Label(crawl_prog_row, textvariable=crawl_prog_var, foreground="#666",
-              width=46, anchor="w").pack(side="left", padx=(8, 0))
+              width=34, anchor="w").pack(side="left", padx=(8, 0))
+
+    # 文件状态栏：逐张显示「名称 · 格式 · 大小 · 成败」（与进度同一行，不额外占高度）
+    crawl_file_var = tk.StringVar(value="")
+    crawl_file_lbl = ttk.Label(crawl_prog_row, textvariable=crawl_file_var,
+                               foreground="#666", width=58, anchor="w")
+    crawl_file_lbl.pack(side="left", padx=(8, 0))
 
     ttk.Button(crawl_btns, text="开始爬取", command=start_crawl).pack(side="left")
     # 预估排在"开始爬取"旁边 —— 建议先点它看看量级（几 MB 还是几 TB）
