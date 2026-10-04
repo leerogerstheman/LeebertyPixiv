@@ -1035,7 +1035,7 @@ def default_config(program_dir: Path) -> Dict[str, Any]:
 
 CONFIG_TEMPLATE = {
     "_说明": "config.json —— 改完保存即可，命令行参数会覆盖这里的同名项",
-    "output_dir": "D:\\PixivCrawler\\library",
+    "output_dir": "library",
     "cookie_phpsessid": "（可选）登录 pixiv 后从浏览器 Cookie 里复制 PHPSESSID 的值，可搜索到更多内容",
     "refresh_token": "（可选，二选一）pixiv OAuth refresh_token，填了就改用 App API 搜索",
     "proxy": "（可选）例如 http://127.0.0.1:7890",
@@ -8940,7 +8940,7 @@ def build_parser(program_dir: Path) -> argparse.ArgumentParser:
     def add_common(parser: argparse.ArgumentParser) -> None:
         """通用参数：子命令前后都允许写（parents 会让两处生效）。"""
         parser.add_argument("--config", help="指定 config.json 路径")
-        parser.add_argument("--out", help="图库输出目录（默认 D:\\PixivCrawler\\library）")
+        parser.add_argument("--out", help="图库输出目录（默认：程序所在目录下的 library）")
         parser.add_argument("--cookie", help="PHPSESSID（覆盖配置）")
         parser.add_argument("--refresh-token", dest="refresh_token", help="pixiv refresh_token（覆盖配置）")
         parser.add_argument("--proxy", help="HTTP 代理，如 http://127.0.0.1:7890")
