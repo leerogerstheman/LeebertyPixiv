@@ -24,6 +24,23 @@ python pixiv_crawler.py search 初音 --tag 雪ミク  # ④ 检索已下载的�
 python pixiv_crawler.py gui                     # 图形界面
 ```
 
+**网页版**：双击 `web.bat`（或 `python webui.py`），界面在浏览器里打开。
+
+后端完全是同一套 `pixiv_crawler.py`，检索结果与统计数字与桌面版一致。两点不同：
+
+- **不需要 tkinter**。界面由标准库 `http.server` 提供。`gui.bat` 在没有 tkinter 的
+  Python 上会退回命令行模式，而网页版照常可用。
+- **不需要 Pillow**。桌面版的缩略图预览用 PIL 的 `ImageTk`，网页版让浏览器自己渲染。
+
+```powershell
+python webui.py                     # 默认端口 8762，自动打开浏览器
+python webui.py --port 9000 --no-browser
+python webui.py --out D:\另一份图库   # 换图库位置
+```
+
+只监听 `127.0.0.1`，不对外网开放。登录凭据不在网页里改——那是敏感信息，走桌面版的
+登录页或 `auth` 命令。
+
 ## 功能一览
 
 | 能力 | 说明 |

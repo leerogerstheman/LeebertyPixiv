@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LeebertyPixiv · pixiv 关键词爬虫</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">P</span>
+    <div>
+      <h1>LeebertyPixiv</h1>
+      <p class="brand-sub">pixiv 关键词爬虫 · 网页版</p>
+    </div>
+  </div>
+  <div class="topbar-spacer"></div>
+  <div class="chip" id="credChip">登录状态读取中…</div>
+  <div class="chip" id="libChip"></div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="crawl" role="tab">爬取</button>
+  <button class="tab" data-tab="search" role="tab">检索</button>
+  <button class="tab" data-tab="library" role="tab">图库</button>
+  <button class="tab" data-tab="settings" role="tab">设置</button>
+</nav>
+
+<main>
+
+  <!-- ===================================================== 爬取 -->
+  <section class="panel active" id="panel-crawl">
+    <div class="grid">
+      <div class="card">
+        <h2>爬什么</h2>
+        <label class="field">
+          <span>关键词 <em>（空格或逗号分隔多个）</em></span>
+          <input type="text" id="kwInput" placeholder="初音ミク 風景">
+        </label>
+        <label class="field">
+          <span>检索范围</span>
+          <select id="scopeSel">
+            <option value="auto">自动</option>
+            <option value="keyword">按关键词（标签部分匹配）</option>
+            <option value="artist">按画师（走画师作品接口）</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>只收这些画师 <em>（ID，逗号分隔，可留空）</em></span>
+          <input type="text" id="aidInput" placeholder="1234567">
+        </label>
+        <div class="row row-3">
+          <label class="field"><span>页数</span><input type="number" id="pagesInput" min="1" max="100" value="1"></label>
+          <label class="field"><span>排序</span>
+            <select id="orderSel">
+              <option value="date">最新</option>
+              <option value="popular_desc">热门</option>
+            </select>
+          </label>
+          <label class="field"><span>本次上限（0 = 不限）</span><input type="number" id="maxInput" min="0" value="0"></label>
+        </div>
+        <div class="row row-3">
+          <label class="field"><span>起始日期</span><input type="text" id="fromInput" placeholder="2024-01-31"></label>
+          <label class="field"><span>结束日期</span><input type="text" id="toInput" placeholder="2024-12-31"></label>
+          <label class="field"><span>动图格式</span>
+            <select id="ugoiraSel">
+              <option value="none">不收动图</option>
+              <option value="gif">GIF</option>
+              <option value="webp">WebP</option>
+              <option value="mp4">MP4</option>
+            </select>
+          </label>
+        </div>
+        <div class="row row-3">
+          <label class="field"><span>最少点赞</span><input type="number" id="likesInput" min="0" value="0"></label>
+          <label class="field"><span>最少收藏</span><input type="number" id="bmInput" min="0" value="0"></label>
+          <label class="field"><span>每作品最多页数（0 = 不限）</span><input type="number" id="mpwInput" min="0" value="0"></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>内容筛选</h2>
+        <p class="hint">至少要勾一个分级，否则没有任何内容会被爬取。</p>
+        <div class="chips" id="r18Chips"></div>
+        <label class="field">
+          <span>AI 生成</span>
+          <select id="aiSel">
+            <option value="all">不限</option>
+            <option value="exclude">排除 AI 生成</option>
+            <option value="only">只要 AI 生成</option>
+          </select>
+        </label>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="deepChk"> 深度翻页</label>
+          <label class="check"><input type="checkbox" id="dryChk"> 只试运行（不下载）</label>
+          <label class="check"><input type="checkbox" id="forceChk"> 强制重下已有的</label>
+        </div>
+        <div class="row">
+          <button class="btn btn-primary" id="startBtn">开始爬取</button>
+          <button class="btn" id="stopBtn" disabled>安全停止</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>进度</h2>
+        <div class="progress"><div class="bar" id="bar"></div></div>
+        <p class="stage" id="stage">等待开始…</p>
+        <div class="counters">
+          <div><b id="cDl">0</b><span>已下载</span></div>
+          <div><b id="cSkip">0</b><span>跳过</span></div>
+          <div><b id="cFail">0</b><span>失败</span></div>
+          <div><b id="cR18">0</b><span>R-18 过滤</span></div>
+          <div><b id="cUgo">0</b><span>动图过滤</span></div>
+          <div><b id="cElapsed">0s</b><span>耗时</span></div>
+        </div>
+        <pre class="log" id="log">等待开始…</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 检索 -->
+  <section class="panel" id="panel-search">
+    <div class="card">
+      <h2>图库检索</h2>
+      <p class="hint">全部在本地图库里查，不联网。</p>
+      <div class="row row-3">
+        <label class="field"><span>文本</span><input type="text" id="sText" placeholder="标题里的词"></label>
+        <label class="field"><span>标签 <em>（逗号分隔）</em></span><input type="text" id="sTags" placeholder="初音ミク, 風景"></label>
+        <label class="field"><span>画师名</span><input type="text" id="sAuthor"></label>
+      </div>
+      <div class="row row-3">
+        <label class="field"><span>画师 ID <em>（逗号分隔）</em></span><input type="text" id="sAids"></label>
+        <label class="field"><span>来源关键词</span><input type="text" id="sQuery"></label>
+        <label class="field"><span>衍生标签</span><input type="text" id="sDtags"></label>
+      </div>
+      <div class="row row-3">
+        <label class="field"><span>起始日期</span><input type="text" id="sFrom" placeholder="2024-01-01"></label>
+        <label class="field"><span>结束日期</span><input type="text" id="sTo" placeholder="2024-12-31"></label>
+        <label class="field"><span>排序</span>
+          <select id="sortSel">
+            <option value="default">默认</option>
+            <option value="date">发布日期</option>
+            <option value="likes">点赞从多到少</option>
+            <option value="bookmarks">收藏从多到少</option>
+            <option value="size">体积从大到小</option>
+          </select>
+        </label>
+      </div>
+      <div class="row row-3">
+        <label class="field"><span>分级</span><select id="sR18"></select></label>
+        <label class="field"><span>AI 生成</span>
+          <select id="sAi"><option value="all">不限</option><option value="exclude">排除</option><option value="only">只要</option></select>
+        </label>
+        <label class="field"><span>门槛</span>
+          <div class="row">
+            <input type="number" id="sLikes" min="0" placeholder="最少点赞">
+            <input type="number" id="sBm" min="0" placeholder="最少收藏">
+          </div>
+        </label>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="sTagsAll" checked> 标签需全部命中</label>
+        <label class="check"><input type="checkbox" id="sDtagsAll" checked> 衍生标签需全部命中</label>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary" id="searchBtn">搜索</button>
+        <button class="btn btn-text" id="clearBtn">清空条件</button>
+        <button class="btn" id="exportHitsBtn">导出命中</button>
+        <span class="hits" id="hits"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <table class="table">
+        <thead><tr><th>ID</th><th>标题</th><th>画师</th><th>日期</th><th>分级</th><th>收藏</th><th>标签</th><th></th></tr></thead>
+        <tbody id="rows"><tr><td colspan="8" class="empty">还没有检索结果。</td></tr></tbody>
+      </table>
+      <p class="hint" id="tableNote"></p>
+    </div>
+  </section>
+
+  <!-- ===================================================== 图库 -->
+  <section class="panel" id="panel-library">
+    <div class="grid">
+      <div class="card">
+        <h2>图库统计</h2>
+        <div class="stats-grid" id="statsGrid"></div>
+        <pre class="log" id="topTags"></pre>
+        <div class="row">
+          <button class="btn" id="reindexBtn">重建索引</button>
+          <button class="btn btn-text" id="statsBtn">刷新</button>
+        </div>
+        <p class="hint" id="reindexNote"></p>
+      </div>
+      <div class="card">
+        <h2>导出</h2>
+        <div class="row">
+          <button class="btn btn-primary" data-fmt="markdown">Markdown 清单</button>
+          <button class="btn" data-fmt="csv">CSV</button>
+          <button class="btn" data-fmt="sqlite">SQLite</button>
+        </div>
+        <p class="hint" id="exportNote">CSV / SQLite 会顺带重建全部索引。</p>
+        <h2 style="margin-top:18px">爬取历史</h2>
+        <pre class="log" id="history">（无）</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 设置 -->
+  <section class="panel" id="panel-settings">
+    <div class="card">
+      <h2>爬取设置</h2>
+      <p class="hint">改完点保存，写回 <code>config.json</code>（只改下面这几项，其余原样保留）。
+        登录凭据不在这里改——那是敏感信息，走桌面版的登录页或 <code>auth</code> 命令。</p>
+      <div class="row row-3">
+        <label class="field"><span>每秒请求数</span><input type="number" id="sRps" step="0.1" min="0.1"></label>
+        <label class="field"><span>并发</span><input type="number" id="sConc" min="1" max="16"></label>
+        <label class="field"><span>超时（秒）</span><input type="number" id="sTimeout" min="5"></label>
+      </div>
+      <div class="row row-3">
+        <label class="field"><span>重试次数</span><input type="number" id="sRetry" min="0" max="20"></label>
+        <label class="field"><span>搜索间隔（秒）</span><input type="number" id="sDelay" step="0.05" min="0"></label>
+        <label class="field"><span>代理</span><input type="text" id="sProxy" placeholder="http://127.0.0.1:7890"></label>
+      </div>
+      <div class="row row-3">
+        <label class="field"><span>默认页数</span><input type="number" id="sPages" min="1"></label>
+        <label class="field"><span>默认排序</span><input type="text" id="sOrder"></label>
+        <label class="field"><span>默认检索类型</span><input type="text" id="sStype"></label>
+      </div>
+      <div class="row row-3">
+        <label class="field"><span>默认上限（0 = 不限）</span><input type="number" id="sMax" min="0"></label>
+        <label class="field"><span>默认最少点赞</span><input type="number" id="sLikes" min="0"></label>
+        <label class="field"><span>默认最少收藏</span><input type="number" id="sBm" min="0"></label>
+      </div>
+      <div class="row row-3">
+        <label class="field"><span>ffmpeg 路径</span><input type="text" id="sFfmpeg"></label>
+        <label class="field"><span>动图格式</span><input type="text" id="sUgo"></label>
+        <label class="field"><span>每作品最多页数</span><input type="number" id="sMpw" min="0"></label>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary" id="saveBtn">保存设置</button>
+        <span class="hint" id="saveNote"></span>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="dialog-host" id="dialogHost" hidden>
+  <div class="dialog" role="dialog" aria-modal="true">
+    <header><h3 id="dlgTitle">作品详情</h3><button class="btn btn-text" id="dlgClose">关闭</button></header>
+    <pre class="dlg-body" id="dlgBody"></pre>
+  </div>
+</div>
+
+<div class="toast-host" id="toastHost"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
