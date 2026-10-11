@@ -102,15 +102,25 @@ for r in rows:
 check("至少 3 项有结论", len(rows) >= 3, len(rows))
 check("没有停留在「检测中…」", not any("检测中" in r for r in rows), rows)
 
+# 凭据失效时体检会直接给「✗ 检测失败」，此时本来就没有登录/匿名对比数据与建议，
+# 这两项不应判失败（测试不依赖外部凭据是否有效）。
+cred_failed = any("检测失败" in t for t in allt)
+
 print("\n=== 5) 明细信息（可读取量）===")
 cap = [t for t in allt if "登录可读" in t]
 print(f"  {cap}")
-check("显示了登录/匿名对比", bool(cap), cap)
+if cred_failed:
+    print("  （当前凭据失效，体检已如实报「检测失败」，跳过此项对比检查）")
+else:
+    check("显示了登录/匿名对比", bool(cap), cap)
 
 print("\n=== 6) 建议区 ===")
-adv = [t for t in allt if "一切正常" in t or "重新导入" in t or "（无）" in t]
+adv = [t for t in allt if "一切正常" in t or "重新导入" in t or "（无）" in t or "检测失败" in t]
 print(f"  {adv}")
-check("给出了建议", bool(adv), adv)
+if cred_failed:
+    print("  （凭据失效路径：以「检测失败」结论作为反馈，跳过建议检查）")
+else:
+    check("给出了建议", bool(adv), adv)
 
 print("\n=== 7) 按钮可用 ===")
 btns = []

@@ -1838,7 +1838,7 @@ class PixivClient:
                         "createDate": it.get("create_date") or "",
                         "tags": [{"tag": str(t)} if isinstance(t, str) else t
                                  for t in (it.get("tags") or [])],
-                        "aiType": 1 if (it.get("ai_type") or 0) != 0 else 0,
+                        "aiType": int(it.get("ai_type") or 0),
                     })
                 total = len(briefs)
                 nxt = data.get("next_url")
@@ -1943,6 +1943,20 @@ def app_url_to_original(url: str) -> str:
 # --------------------------------------------------------------------------------------
 # 记录构造 / 分类
 # --------------------------------------------------------------------------------------
+
+
+def is_ai_work(ai_type: Any) -> bool:
+    """判断 pixiv 的 aiType 是否表示「AI 生成」。
+
+    ⚠️ pixiv 的语义（2026-10 实测确认，**曾经写反过**）：
+        0 = 未标注/未知      （搜索结果里通常不出现）
+        1 = 非 AI（人类创作） ← 绝大多数作品
+        2 = AI 生成          ← 带「AIイラスト」等标签的那批
+    早期版本用 `aiType != 0` 当 AI，等于把「1=人类」也当成 AI，
+    导致「排除 AI」实际只留下 AI、「只要 AI」反而没筛干净 —— 完全反了。
+    现在统一用这个函数判断，语义只定义一次。
+    """
+    return as_int(ai_type, 0) >= 2
 
 
 def _split_tag(name: str) -> List[str]:
@@ -3006,7 +3020,7 @@ def search_records_advanced(
         if not pass_r18(xr, r18_mode):
             continue
         if ai_mode != "all":
-            is_ai = as_int(r.get("ai"), 0) != 0
+            is_ai = is_ai_work(r.get("ai"))
             if (ai_mode == "only" and not is_ai) or (ai_mode == "exclude" and is_ai):
                 continue
         r_tags = [str(t) for t in (r.get("tags") or [])]
@@ -3401,10 +3415,10 @@ class CrawlSession:
                 if self.verbose:
                     out(f"  - 跳过 {iid}（画师 {uid or '未知'} 不在指定范围内）")
                 return None, []
-        # AIGC（AI 生成）：搜索列表的 aiType 字段（1/2 = AI 生成，0 = 非 AI）。
+        # AIGC（AI 生成）：搜索列表的 aiType 字段（0=未标注, 1=非AI/人类, 2=AI 生成）。
         # 放在列表阶段筛，被排除的作品连详情请求都不用发 —— 全量爬取时这是几千次请求的差别。
         if self.ai_only or self.ai_exclude:
-            is_ai = as_int(brief.get("aiType"), 0) != 0
+            is_ai = is_ai_work(brief.get("aiType"))
             if (self.ai_only and not is_ai) or (self.ai_exclude and is_ai):
                 self.filter_stats["skipped_ai"] = self.filter_stats.get("skipped_ai", 0) + 1
                 if self.verbose:
@@ -3481,11 +3495,11 @@ class CrawlSession:
                         out(f"  - 跳过 {iid}（点赞数 {lk} < {self.min_likes}）")
                     return None, []
 
-        # AIGC 筛选：detail 的 aiType（1/2 = AI 生成，0 = 非 AI）。
+        # AIGC 筛选：detail 的 aiType（0=未标注, 1=非AI/人类, 2=AI 生成）。
         # 好消息：搜索结果列表本身就带 aiType，所以放在"列表阶段"筛更省请求
         # （见 filter_brief_by_ai），这里是详情阶段的双保险。
         if self.ai_only or self.ai_exclude:
-            is_ai = as_int(detail.get("aiType"), 0) != 0
+            is_ai = is_ai_work(detail.get("aiType"))
             if self.ai_only and not is_ai:
                 self.filter_stats["skipped_ai"] = self.filter_stats.get("skipped_ai", 0) + 1
                 if self.verbose:
@@ -3700,7 +3714,7 @@ class CrawlSession:
         if self.artist_ids and str(it.get("userId") or "").strip() not in self.artist_ids:
             return False
         if self.ai_only or self.ai_exclude:
-            is_ai = as_int(it.get("aiType"), 0) != 0
+            is_ai = is_ai_work(it.get("aiType"))
             if (self.ai_only and not is_ai) or (self.ai_exclude and is_ai):
                 return False
         if as_int(it.get("xRestrict"), 0) not in self.r18_levels:
@@ -3829,9 +3843,9 @@ class CrawlSession:
             if self.range.active and not self.range.contains(
                     parse_illust_datetime(it.get("createDate"))):
                 continue
-            if self.ai_only and as_int(it.get("aiType"), 0) == 0:
+            if self.ai_only and not is_ai_work(it.get("aiType")):
                 continue
-            if self.ai_exclude and as_int(it.get("aiType"), 0) != 0:
+            if self.ai_exclude and is_ai_work(it.get("aiType")):
                 continue
             n += 1
         return n
@@ -3948,7 +3962,7 @@ class CrawlSession:
 
         if self.ai_only or self.ai_exclude:
             def _is_ai(it: Dict[str, Any]) -> bool:
-                return as_int(it.get("aiType"), 0) != 0
+                return is_ai_work(it.get("aiType"))
             kept = [it for it in collected
                     if (_is_ai(it) if self.ai_only else not _is_ai(it))]
             dropped = len(collected) - len(kept)
@@ -4483,7 +4497,7 @@ class CrawlSession:
             if self.r18_levels != R18_LEVELS and xr not in self.r18_levels:
                 self.skipped_r18 += (xr == 1 or xr == 2)
                 continue
-            is_ai = int(b.get("aiType") or 0) != 0
+            is_ai = is_ai_work(b.get("aiType"))
             if self.ai_only and not is_ai:
                 continue
             if self.ai_exclude and is_ai:

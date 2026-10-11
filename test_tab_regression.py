@@ -86,7 +86,12 @@ pump(3)
 banners = [t for t in all_texts() if any(k in t for k in
           ("正在检测", "完全可用", "仅匿名", "部分受限", "检测失败", "正在实测", "正在校验"))]
 print(f"  横幅: {banners[:2]}")
-check("自动体检已启动", any(("正在检测" in t) or ("正在实测" in t) for t in banners), banners[:2])
+# 体检只要"启动了"即可：可能是进行中（正在检测/实测），也可能是已完成（成功或失败）。
+# 凭据失效时会在几秒内直接给出「✗ 检测失败」，这同样是正确行为，不该判失败。
+check("自动体检已启动或已给出结论",
+      any(any(k in t for k in ("正在检测", "正在实测", "正在校验",
+                               "完全可用", "仅匿名", "部分受限", "检测失败"))
+          for t in banners), banners[:2])
 
 print("\n=== 3) 追更页可加载清单（构造后立即有表）===")
 tab1 = nb.nametowidget(nb.tabs()[1])

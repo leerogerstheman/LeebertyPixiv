@@ -64,7 +64,7 @@ try:
     s2.client = FakeClient([
         {"id": "1000", "xRestrict": 0, "aiType": 0, "userId": "2"},   # 已下载 → 跳过
         {"id": "1001", "xRestrict": 1, "aiType": 0, "userId": "2"},   # R18 → 跳过
-        {"id": "1002", "xRestrict": 0, "aiType": 1, "userId": "2"},   # AI → 跳过
+        {"id": "1002", "xRestrict": 0, "aiType": 2, "userId": "2"},   # AI(aiType=2) → 跳过
         {"id": "1003", "xRestrict": 0, "aiType": 0, "userId": "3"},   # 画师错 → 跳过
         {"id": "1004", "xRestrict": 0, "aiType": 0, "userId": "2"},   # 唯一该留下的
     ])
